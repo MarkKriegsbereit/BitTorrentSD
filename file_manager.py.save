@@ -1,0 +1,67 @@
+# file_manager.py
+import os
+import json
+from common import BLOCK_SIZE
+
+class FileManager:
+    def __init__(self, filename, total_size=0, is_seeder=False):
+        self.filename = filename
+        self.log_file = f"{filename}.progress"
+        self.is_seeder = is_seeder
+        
+        # Si soy seeder, tengo todo. Si no, calculo cuánto debería tener.
+        if is_seeder:
+            self.total_size = os.path.getsize(filename)
+            self.total_chunks = (self.total_size // BLOCK_SIZE) + 1
+            self.bitfield = [True] * self.total_chunks
+        else:
+            self.total_size = total_size
+            self.total_chunks = (self.total_size // BLOCK_SIZE) + 1
+            self.bitfield = [False] * self.total_chunks
+            self.load_progress() # INTENTA RECUPERAR ESTADO PREVIO
+
+    def load_progress(self):
+        """Recupera la descarga tras una desconexión (Punto 4 Rúbrica)."""
+        if os.path.exists(self.log_file):
+            try:
+                with open(self.log_file, 'r') as f:
+                    data = json.load(f)
+                    saved_indices = data.get("downloaded", [])
+                    for idx in saved_indices:
+                        if idx < self.total_chunks:
+                            self.bitfield[idx] = True
+                print(f"[RECOVERY] Progreso recuperado: {self.get_progress_percentage()}%")
+            except:
+                print("[!] Error leyendo log, iniciando desde cero.")
+
+    def save_progress(self):
+        """Guarda el estado actual."""
+        if not self.is_seeder:
+            downloaded = [i for i, x in enumerate(self.bitfield) if x]
+            with open(self.log_file, 'w') as f:
+                json.dump({"downloaded": downloaded}, f)
+
+    def write_chunk(self, index, data):
+        """Escribe una pieza en la posición exacta del archivo."""
+        mode = 'r+b' if os.path.exists(self.filename) else 'wb'
+        with open(self.filename, mode) as f:
+            f.seek(index * BLOCK_SIZE)
+            f.write(data)
+        
+        self.bitfield[index] = True
+        self.save_progress()
+
+    def read_chunk(self, index):
+        """Lee una pieza para enviarla a otro peer."""
+        if not self.bitfield[index]
+            return None
+        with open(self.filename'rb') as f:
+            f.seek(index * BLOCK_SIZE)
+            return f.read(BLOCK_SIZE)
+
+    def get_missing_chunks(self):
+        return [i for i, x in enumerate(self.bitfield) if not x]
+
+    def get_progress_percentage(self):
+        completed = sum(self.bitfield)
+        return round((completed / self.total_chun
