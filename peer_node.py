@@ -9,12 +9,11 @@ from common import *
 from file_manager import FileManager
 
 # --- CONFIGURACIÓN ---
-TRACKER_IP = "127.0.0.1"
-
-# !!! FRENO DE MANO !!!
-# Tiempo en segundos que el programa SE CONGELA después de bajar cada pieza.
-# 0.5 = Rápido pero visible. 2.0 = Muy lento (ideal para explicar en video).
-TIME_DELAY = .2
+KNOWN_TRACKERS = [
+    ("127.0.0.1", 5000), # Tracker Principal
+    ("127.0.0.1", 5001)  # Tracker de Respaldo
+]
+TIME_DELAY = 0.2
 
 class PeerNode:
     def __init__(self, port):
@@ -22,352 +21,276 @@ class PeerNode:
         self.my_ip = "127.0.0.1"
         self.my_id = f"{self.my_ip}:{port}"
         self.folder = f"peer_{port}"
-        
-        if not os.path.exists(self.folder):
-            os.makedirs(self.folder)
+        if not os.path.exists(self.folder): os.makedirs(self.folder)
 
-        self.managers = {}
+        self.managers = {} 
         self.managers_lock = threading.Lock()
         self.running = True
 
-        # 1. PRIMERO: Recuperar memoria local (Auto-Discovery)
-        self.recover_state()
+        # Recuperación silenciosa al inicio
+        self.scan_folder()
 
-        # 2. SEGUNDO: Iniciar servicios
+        # Iniciar servicios
         threading.Thread(target=self.start_server, daemon=True).start()
         threading.Thread(target=self.heartbeat_loop, daemon=True).start()
 
-
-    def recover_state(self):
-        """
-        Escanea la carpeta local buscando archivos .json conocidos.
-        Carga su estado y notifica al tracker INMEDIATAMENTE.
-        """
-        print(f"\n[*] Escaneando carpeta local '{self.folder}' para recuperación...")
-        json_files = glob.glob("*.json")
-        
-        # También buscar jsons dentro de la carpeta del peer si se movieron ahí
-        peer_jsons = glob.glob(os.path.join(self.folder, "*.json"))
-        all_jsons = list(set(json_files + peer_jsons))
-
-        count = 0
-        for json_path in all_jsons:
-            try:
-                with open(json_path, 'r') as f:
-                    meta = json.load(f)
-                
-                # Cargamos el gestor (esto lee el .progress automáticamente)
-                mgr = self.add_manager(
-                    meta['filename'], 
-                    meta['filehash'], 
-                    meta['filesize'], 
-                    meta['trackers']
-                )
-                
-                pct = mgr['fm'].get_progress_percentage()
-                print(f"   -> Recuperado: {meta['filename']} ({pct}%)")
-                
-                # ANUNCIO INMEDIATO:
-                # Esto hace que el Tracker sepa QUE YA VOLVIMOS y qué tenemos.
-                # Cumple con "Reintegrarse con el Tracker" 
-                self.contact_tracker(CMD_ANNOUNCE, meta['filehash'], meta['trackers'])
-                count += 1
-            except Exception as e:
-                print(f"   [!] Error recuperando {json_path}: {e}")
-        
-        if count > 0:
-            print(f"[*] Se recuperaron {count} archivos. El tracker ha sido notificado.")
-        else:
-            print("[*] No se encontraron descargas previas para recuperar.")
-
-
-
-
-
-
-    def get_manager(self, file_hash):
-        with self.managers_lock:
-            return self.managers.get(file_hash)
-
+    # --- GESTIÓN DE ARCHIVOS ---
     def add_manager(self, filename, file_hash, size, trackers):
         with self.managers_lock:
-            if file_hash in self.managers:
-                return self.managers[file_hash]
+            if file_hash in self.managers: return self.managers[file_hash]
             
-            full_path = os.path.join(self.folder, filename)
-            is_seeder = False
-            if os.path.exists(full_path) and os.path.getsize(full_path) == size:
-                is_seeder = True
-
+            real_path = os.path.join(self.folder, filename)
+            is_seeder = os.path.exists(real_path) and os.path.getsize(real_path) == size
+            
             fm = FileManager(self.folder, filename, size, is_seeder)
             self.managers[file_hash] = {
-                "fm": fm,
-                "filename": filename,
-                "trackers": trackers,
-                "downloading": False,
-                "speed": 0 # Para cálculo futuro
+                "fm": fm, "filename": filename, "trackers": trackers, "downloading": False
             }
             return self.managers[file_hash]
 
-    # --- SERVIDOR (SUBIDA) ---
-    def start_server(self):
-        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1) # Evita error de puerto ocupado
-        s.bind(('0.0.0.0', self.my_port))
-        s.listen(10)
-        while self.running:
+    def scan_folder(self):
+        """Escanea carpeta local para recuperar descargas previas."""
+        json_files = glob.glob(os.path.join(self.folder, "*.json"))
+        count = 0
+        for json_path in json_files:
             try:
+                with open(json_path, 'r') as f: meta = json.load(f)
+                with self.managers_lock:
+                    if meta['filehash'] in self.managers: continue
+
+                real_path = os.path.join(self.folder, meta['filename'])
+                if os.path.exists(real_path) or os.path.exists(real_path + ".progress"):
+                    self.add_manager(meta['filename'], meta['filehash'], meta['filesize'], meta['trackers'])
+                    self.contact_tracker(CMD_ANNOUNCE, meta['filehash'], meta['trackers'])
+                    count += 1
+            except: pass
+        if count > 0:
+            print(f"[*] Sistema restaurado: {count} archivos cargados.")
+
+    # --- SERVIDOR ---
+    def start_server(self):
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            s.bind(('0.0.0.0', self.my_port))
+            s.listen(10)
+            while self.running:
                 conn, addr = s.accept()
                 threading.Thread(target=self.handle_upload, args=(conn,)).start()
-            except: break
+        except: pass
 
     def handle_upload(self, conn):
         try:
-            req = json.loads(conn.recv(BUFFER_SIZE).decode())
-            if req['command'] == CMD_REQUEST_CHUNK:
-                f_hash = req.get('file_hash')
-                idx = req.get('chunk_index')
-                mgr = self.get_manager(f_hash)
-                
+            raw = conn.recv(BUFFER_SIZE).decode()
+            if not raw: return
+            req = json.loads(raw)
+            cmd = req.get('command')
+            
+            if cmd == CMD_REQUEST_CHUNK:
+                mgr = self.managers.get(req.get('file_hash'))
                 if mgr:
-                    data = mgr['fm'].read_chunk(idx)
+                    data = mgr['fm'].read_chunk(req.get('chunk_index'))
                     if data:
-                        header = json.dumps({"status": "ok", "size": len(data)}).encode()
-                        conn.send(header + b'\n' + data)
+                        conn.send(json.dumps({"status": "ok", "size": len(data)}).encode() + b'\n' + data)
                         return
-                conn.send(json.dumps({"status": "error"}).encode() + b'\n')
+
+            elif cmd == CMD_GET_METADATA:
+                mgr = self.managers.get(req.get('file_hash'))
+                if mgr:
+                    meta = {"status": "ok", "filename": mgr['filename'], "filesize": mgr['fm'].total_size, "trackers": mgr['trackers']}
+                    conn.send(json.dumps(meta).encode())
+                    return
+            
+            conn.send(json.dumps({"status": "error"}).encode() + b'\n')
         except: pass
         finally: conn.close()
 
-    # --- CLIENTE (DESCARGA) ---
-    def start_download_thread(self, file_hash):
-        mgr = self.get_manager(file_hash)
-        if not mgr: return
-        
-        if mgr['fm'].get_progress_percentage() == 100:
-            return
+    # --- CLIENTE ---
+    def fetch_metadata_from_swarm(self, file_hash, peers_list):
+        print(f"[*] Solicitando metadatos al enjambre...")
+        for p_data in peers_list:
+            if p_data['id'] == self.my_id: continue 
+            try:
+                ip, port = p_data['id'].split(':')
+                s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                s.settimeout(2)
+                s.connect((ip, int(port)))
+                s.send(json.dumps({"command": CMD_GET_METADATA, "file_hash": file_hash}).encode())
+                resp = json.loads(s.recv(BUFFER_SIZE).decode())
+                s.close()
+                if resp.get('status') == 'ok': return resp
+            except: pass
+        return None
 
+    def start_download_thread(self, file_hash):
+        mgr = self.managers.get(file_hash)
+        if not mgr or mgr['fm'].get_progress_percentage() == 100: return
         mgr['downloading'] = True
-        t = threading.Thread(target=self._download_logic, args=(file_hash,))
-        t.daemon = True
-        t.start()
+        threading.Thread(target=self._download_logic, args=(file_hash,), daemon=True).start()
 
     def _download_logic(self, file_hash):
-        mgr = self.get_manager(file_hash)
+        mgr = self.managers.get(file_hash)
         fm = mgr['fm']
+        print(f"[*] Descarga iniciada: {mgr['filename']}")
         
         while fm.get_missing_chunks() and mgr['downloading'] and self.running:
             peers = self.contact_tracker(CMD_ANNOUNCE, file_hash, mgr['trackers'])
-            valid_peers = [p for p in peers if p['id'] != self.my_id and p['percent'] > 0]
+            valid = [p for p in peers if p['id'] != self.my_id and p['percent'] > 0]
             
-            if not valid_peers:
-                time.sleep(2)
-                continue
-
+            if not valid: time.sleep(2); continue
+            
             for idx in fm.get_missing_chunks():
                 if not mgr['downloading'] or not self.running: break
-                for p_data in valid_peers:
-                    # Intentamos descargar
-                    if self.request_chunk(p_data['id'], idx, file_hash, fm):
-                        break # Pasamos al siguiente chunk
-            
+                for p in valid:
+                    if self.request_chunk(p['id'], idx, file_hash, fm): break
             time.sleep(0.1)
-
+        
         if not fm.get_missing_chunks():
             mgr['downloading'] = False
             self.contact_tracker(CMD_ANNOUNCE, file_hash, mgr['trackers'])
+            print(f"\n[★] ¡DESCARGA COMPLETA!: {mgr['filename']}")
 
     def request_chunk(self, peer_addr, idx, file_hash, fm):
         try:
             ip, port = peer_addr.split(':')
             s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            s.settimeout(3)
+            s.settimeout(2)
             s.connect((ip, int(port)))
-            
-            req = {
-                "command": CMD_REQUEST_CHUNK, 
-                "file_hash": file_hash, 
-                "chunk_index": idx
-            }
-            s.send(json.dumps(req).encode())
-            
+            s.send(json.dumps({"command": CMD_REQUEST_CHUNK, "file_hash": file_hash, "chunk_index": idx}).encode())
             f = s.makefile('rb')
-            line = f.readline()
-            if not line: return False
-            header = json.loads(line)
-            
-            if header['status'] == 'ok':
-                data = f.read(header['size'])
-                fm.write_chunk(idx, data)
-                
-                # --- AQUÍ ESTÁ EL FRENO OBLIGATORIO ---
-                # Se ejecuta SIEMPRE que se baja una pieza correctamente
-                if TIME_DELAY > 0:
-                    time.sleep(TIME_DELAY)
-                # --------------------------------------
+            head = json.loads(f.readline())
+            if head['status'] == 'ok':
+                fm.write_chunk(idx, f.read(head['size']))
+                if TIME_DELAY > 0: time.sleep(TIME_DELAY)
                 return True
         except: pass
         return False
 
-    # --- COMUNICACIÓN TRACKER ---
-    def contact_tracker(self, command, file_hash=None, trackers_list=None):
-        if trackers_list is None: trackers_list = [(TRACKER_IP, TRACKER_PORT)]
-        for ip, port in trackers_list:
+    def contact_tracker(self, command, file_hash=None, trackers=None):
+        if not trackers: trackers = KNOWN_TRACKERS
+        
+        # Acumulador de peers (por si un tracker tiene unos y otro tiene otros)
+        combined_peers = []
+        combined_files = []
+        
+        for ip, port in trackers:
             try:
                 s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                s.settimeout(2)
+                s.settimeout(1) # Timeout corto para no congelar si uno está caído
                 s.connect((ip, port))
+                
                 req = {"command": command, "peer_id": self.my_id}
-                if command == CMD_ANNOUNCE and file_hash:
-                    mgr = self.get_manager(file_hash)
-                    if mgr:
+                
+                if file_hash:
+                    req["file_hash"] = file_hash
+                    mgr = self.managers.get(file_hash)
+                    if mgr: 
                         req.update({
-                            "file_hash": file_hash,
-                            "filename": mgr["filename"],
+                            "filename": mgr["filename"], 
                             "percent": mgr["fm"].get_progress_percentage()
                         })
+                
                 s.send(json.dumps(req).encode())
                 resp = json.loads(s.recv(BUFFER_SIZE).decode())
                 s.close()
+                
                 if resp['status'] == 'ok':
-                    return resp['peers'] if command == CMD_ANNOUNCE else resp['files']
-            except: pass
+                    # CASO 1: Si solo estamos leyendo (Buscar archivos),
+                    # con que uno responda nos basta.
+                    if command == CMD_LIST_FILES:
+                        return resp['files']
+                    
+                    # CASO 2: Si estamos anunciando (ANNOUNCE o EXIT),
+                    # ¡DEBEMOS AVISAR A TODOS! NO HACER RETURN AÚN.
+                    if command == CMD_ANNOUNCE:
+                        if 'peers' in resp:
+                            combined_peers.extend(resp['peers'])
+                        # IMPORTANTE: No hay 'return' aquí. Seguimos al siguiente tracker.
+                    
+                    elif command == CMD_EXIT_SWARM:
+                        # Avisar a todos que me fui
+                        continue 
+
+            except Exception as e:
+                # Si un tracker falla (está caído), lo ignoramos y seguimos con el siguiente
+                pass
+        
+        # Al final del bucle, retornamos lo que acumulamos
+        if command == CMD_ANNOUNCE:
+            # Eliminar duplicados en la lista de peers (opcional pero recomendado)
+            unique_peers = {p['id']: p for p in combined_peers}.values()
+            return list(unique_peers)
+            
         return []
 
     def heartbeat_loop(self):
         while self.running:
             time.sleep(5)
-            with self.managers_lock:
-                hashes = list(self.managers.keys())
+            self.scan_folder()
+            with self.managers_lock: hashes = list(self.managers.keys())
             for h in hashes:
-                mgr = self.get_manager(h)
-                if mgr: self.contact_tracker(CMD_ANNOUNCE, h, mgr['trackers'])
+                mgr = self.managers.get(h)
+                if not mgr: continue
+                path = os.path.join(self.folder, mgr['filename'])
+                if not os.path.exists(path) and not os.path.exists(path + ".progress"):
+                    if not mgr['downloading']:
+                        print(f"\n[!] Archivo eliminado localmente. Saliendo del enjambre.")
+                        self.contact_tracker(CMD_EXIT_SWARM, h, mgr['trackers'])
+                        with self.managers_lock: del self.managers[h]
+                        continue
+                self.contact_tracker(CMD_ANNOUNCE, h, mgr['trackers'])
 
-    # --- VISUALIZACIÓN Y MENÚ ---
-    def monitor_downloads(self):
-        """Pantalla de estado en tiempo real que se actualiza sola."""
-        try:
-            while True:
-                # Limpiar pantalla sin parpadeo excesivo
-                os.system('cls' if os.name == 'nt' else 'clear')
-                print(f"┌── MONITOR DE DESCARGAS (Puerto {self.my_port}) ──┐")
-                print("│ Presiona Ctrl+C para volver al menú principal │")
-                print("└───────────────────────────────────────────────┘\n")
-                
-                active = False
-                with self.managers_lock:
-                    for h, m in self.managers.items():
-                        active = True
-                        pct = m['fm'].get_progress_percentage()
-                        # Crear barra de progreso [#####-----]
-                        blocks = int(pct // 5)
-                        bar = "█" * blocks + "░" * (20 - blocks)
-                        status = "BAJANDO ⬇" if m['downloading'] else ("SEEDING ⬆" if pct==100 else "PAUSA ⏸")
-                        
-                        print(f"Archivo: {m['filename']}")
-                        print(f"Estado:  [{bar}] {pct}% | {status}")
-                        print("-" * 50)
-
-                if not active:
-                    print(" [!] No hay archivos activos.")
-                
-                time.sleep(0.5) # Actualizar pantalla cada medio segundo
-        except KeyboardInterrupt:
-            pass # Volver al menú al presionar Ctrl+C
-
-    def main_menu(self):
-        while self.running:
-            os.system('cls' if os.name == 'nt' else 'clear')
-            print("\n┌── BITTORRENT CLIENT ──┐")
-            print("│ 1. Cargar .json local │")
-            print("│ 2. Buscar en Tracker  │")
-            print("│ 3. VER PROGRESO (MONITOR) │ <--- CLIC AQUÍ")
-            print("│ 4. Salir              │")
-            print("└───────────────────────┘")
-            op = input(">> ")
-            
-            if op == '1': 
-                self.load_local_json()
-            elif op == '2': 
-                self.search_tracker()
-            elif op == '3': 
-                self.monitor_downloads()
-            elif op == '4': 
-                self.running = False
-                sys.exit()
-
-
-
-    def load_local_json(self):
-        """
-        Escanea la carpeta actual buscando archivos .json (metadatos).
-        Permite cargar un archivo nuevo o recuperar uno previo.
-        """
-        # 1. Buscar archivos .json en el directorio actual
-        json_files = glob.glob("*.json")
-        
-        if not json_files:
-            print("\n[!] No se encontraron archivos .json en la carpeta actual.")
-            print("    Asegúrate de haber generado el torrent con 'crear_torrent.py'.")
-            input("Presiona Enter para volver...")
+    # --- MENÚS ---
+    def convert_local_file(self):
+        print("\n--- PUBLICAR ARCHIVO ---")
+        # 1. Listar archivos en la carpeta del peer
+        if not os.path.exists(self.folder):
+            print(f"[ERROR] La carpeta {self.folder} no existe.")
             return
+
+        all_f = [f for f in os.listdir(self.folder) if os.path.isfile(os.path.join(self.folder, f))]
         
-        print("\n┌── SELECCIÓN DE ARCHIVO LOCAL ──┐")
-        for i, f in enumerate(json_files):
-            print(f"│ {i+1}. {f:<25} │")
-        print("└────────────────────────────────┘")
-            
+        # 2. Filtrar: No mostrar .json, .progress, ni archivos que ya tienen torrent
+        cands = []
+        for f in all_f:
+            if f.endswith('.json') or f.endswith('.progress'):
+                continue
+            if f"{f}.json" in all_f:
+                continue
+            cands.append(f)
+        
+        # 3. Validación de lista vacía
+        if not cands:
+            print(f"[!] No hay archivos nuevos en '{self.folder}' para publicar.")
+            print("    -> Copia un archivo (ej. video.mp4) dentro de esa carpeta e intenta de nuevo.")
+            return
+
+        # 4. Mostrar menú
+        for i, f in enumerate(cands): print(f"{i+1}. {f}")
         try:
-            sel = int(input("\n>> Selecciona el número del archivo: ")) - 1
-            if 0 <= sel < len(json_files):
-                # 2. Cargar metadatos
-                selected_file = json_files[sel]
-                with open(selected_file, 'r') as f:
-                    meta = json.load(f)
+            sel = int(input(">> #: ")) - 1
+            if 0 <= sel < len(cands):
+                fname = cands[sel]
+                fpath = os.path.join(self.folder, fname)
+                print("[*] Generando Torrent...")
+                fhash = calculate_file_hash(fpath)
+                size = os.path.getsize(fpath)
                 
-                # 3. Inicializar el Gestor (Esto lee automáticamente el .progress si existe)
-                mgr = self.add_manager(
-                    meta['filename'], 
-                    meta['filehash'], 
-                    meta['filesize'], 
-                    meta['trackers']
-                )
+                # Usar KNOWN_TRACKERS si definiste múltiples, o la lista manual
+                meta = {
+                    "filename": fname, 
+                    "filesize": size, 
+                    "filehash": fhash, 
+                    "trackers": KNOWN_TRACKERS # Asegúrate de tener KNOWN_TRACKERS definido arriba
+                }
                 
-                # 4. ANUNCIO INMEDIATO (Vital para el punto 4 de la rúbrica)
-                # Le decimos al tracker: "¡Estoy aquí y tengo X% de este archivo!"
-                # Así, si éramos seeders o leechers desconectados, volvemos a aparecer en la red.
-                self.contact_tracker(CMD_ANNOUNCE, meta['filehash'], meta['trackers'])
-                
-                # 5. Verificar estado actual
-                current_pct = mgr['fm'].get_progress_percentage()
-                print(f"\n[INFO] Archivo cargado: {meta['filename']}")
-                print(f"[INFO] Integridad verificada: {current_pct}% completado.")
-                
-                # 6. Lógica de Decisión (Descargar, Reanudar o Sembrar)
-                if current_pct < 100:
-                    if mgr['downloading']:
-                        print("[!] Este archivo ya se está descargando activamente en segundo plano.")
-                    else:
-                        # Si es 0% es "Iniciar", si es >0% es "Reanudar"
-                        action = "Reanudar" if current_pct > 0 else "Iniciar"
-                        q = input(f"¿{action} descarga ahora? (s/n): ")
-                        
-                        if q.lower() == 's':
-                            self.start_download_thread(meta['filehash'])
-                else:
-                    print("[★] Archivo completo. Modo SEEDING activo automáticamente.")
-                    print("    (Los otros peers ya pueden descargar de ti).")
-                
-                input("\nPresiona Enter para volver al menú...")
-            else:
-                print("[!] Selección inválida.")
-                time.sleep(1)
-        except ValueError:
-            print("[!] Por favor ingresa un número válido.")
-            time.sleep(1)
+                with open(os.path.join(self.folder, f"{fname}.json"), 'w') as f: json.dump(meta, f, indent=4)
+                self.add_manager(fname, fhash, size, meta['trackers'])
+                self.contact_tracker(CMD_ANNOUNCE, fhash, meta['trackers'])
+                print(f"[OK] {fname} publicado exitosamente.")
         except Exception as e:
-            print(f"[ERROR] No se pudo cargar el archivo: {e}")
-            input("Enter para continuar...")
+            print(f"Error: {e}")
+
 
 
 
@@ -375,24 +298,74 @@ class PeerNode:
 
     def search_tracker(self):
         files = self.contact_tracker(CMD_LIST_FILES)
-        if not files: print("Tracker vacío."); time.sleep(1); return
-        print(f"\n{'#':<3} | {'ARCHIVO':<20} | {'PEERS'}")
-        for i, f in enumerate(files): print(f"{i+1:<3} | {f['filename']:<20} | {f['peers_count']}")
+        if not files: print("[!] Tracker vacío."); return
+        
+        print(f"\n--- ARCHIVOS DISPONIBLES ---")
+        for i, f in enumerate(files): print(f"{i+1}. {f['filename']} (Seeds/Peers: {f['peers_count']})")
+        
         try:
-            sel = int(input("\nDescargar #: ")) - 1
+            sel = int(input(">> Descargar #: ")) - 1
             if 0 <= sel < len(files):
                 target = files[sel]
-                json_name = f"{target['filename']}.json"
-                if os.path.exists(json_name):
-                    with open(json_name, 'r') as f: meta = json.load(f)
-                    self.add_manager(meta['filename'], meta['filehash'], meta['filesize'], meta['trackers'])
-                    self.start_download_thread(meta['filehash'])
-                else: print(f"Falta {json_name}"); time.sleep(2)
+                f_hash = target['hash']
+                jpath = os.path.join(self.folder, f"{target['filename']}.json")
+                
+                # 1. JSON Local
+                if os.path.exists(jpath):
+                    try:
+                        with open(jpath, 'r') as f: meta = json.load(f)
+                        if 'filehash' in meta:
+                            self.add_manager(meta['filename'], meta['filehash'], meta['filesize'], meta['trackers'])
+                            self.start_download_thread(meta['filehash'])
+                            print("[OK] Configuración local cargada.")
+                            return
+                    except: pass
+
+                # 2. Metadatos remotos
+                peers = self.contact_tracker(CMD_ANNOUNCE, f_hash)
+                if not peers: print("[!] No hay peers disponibles."); return
+
+                meta = self.fetch_metadata_from_swarm(f_hash, peers)
+                if meta and 'filename' in meta:
+                    save_meta = {"filename": meta['filename'], "filesize": meta['filesize'], "filehash": f_hash, "trackers": meta['trackers']}
+                    with open(jpath, 'w') as f: json.dump(save_meta, f, indent=4)
+                    self.add_manager(meta['filename'], f_hash, meta['filesize'], meta['trackers'])
+                    self.start_download_thread(f_hash)
+                    print("[OK] Metadatos obtenidos. Descarga comenzada.")
+                else:
+                    print("[ERROR] No se pudieron obtener metadatos del enjambre.")
         except: pass
 
+    def monitor(self):
+        try:
+            while True:
+                os.system('cls' if os.name == 'nt' else 'clear')
+                print(f"┌── MONITOR (Ctrl+C para salir) ───────────────────┐")
+                with self.managers_lock:
+                    if not self.managers: print(" [Sin actividad]")
+                    for h, m in self.managers.items():
+                        pct = m['fm'].get_progress_percentage()
+                        bar = "█" * int(pct//5) + "░" * (20 - int(pct//5))
+                        state = "BAJANDO" if m['downloading'] else ("SEEDING" if pct==100 else "PAUSA")
+                        print(f" {m['filename'][:15]:<15} [{bar}] {pct}% {state}")
+                time.sleep(0.5)
+        except KeyboardInterrupt: pass
+
+    def main_menu(self):
+        while self.running:
+            # Limpieza suave del menú principal
+            # os.system('cls' if os.name == 'nt' else 'clear') 
+            print(f"\n=== PEER {self.my_port} ===")
+            print("1. Publicar Archivo")
+            print("2. Descargar del Tracker")
+            print("3. Monitor de Progreso")
+            print("4. Salir")
+            op = input(">> ")
+            if op == '1': self.convert_local_file()
+            elif op == '2': self.search_tracker()
+            elif op == '3': self.monitor()
+            elif op == '4': self.running = False; sys.exit()
+
 if __name__ == "__main__":
-    if len(sys.argv) < 2:
-        print("Uso: python3 peer_node.py <PUERTO>")
-        sys.exit()
-    node = PeerNode(int(sys.argv[1]))
-    node.main_menu()
+    if len(sys.argv) < 2: print("Uso: python3 peer_node.py <PUERTO>"); sys.exit()
+    PeerNode(int(sys.argv[1])).main_menu()

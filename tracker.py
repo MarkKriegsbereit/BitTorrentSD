@@ -1,23 +1,18 @@
-# tracker.py
-import os
 import socket
 import threading
 import json
 import time
+import os
+import sys
 from datetime import datetime
 from common import *
 
-TIMEOUT_LIMIT = 20  # Damos más tiempo antes de borrar peers
-
-# Estructura: swarm_db[hash][peer_id] = { "percent": 50, "role": "Leecher", "last_seen": timestamp }
-swarm_db = {}
-# Estructura: file_names[hash] = "video.mp4"
+TIMEOUT_LIMIT = 30  
+swarm_db = {}   
 file_names = {} 
-
 lock = threading.Lock()
 
-def get_timestamp():
-    return datetime.now().strftime("%H:%M:%S")
+def get_timestamp(): return datetime.now().strftime("%H:%M:%S")
 
 def prune_dead_peers():
     while True:
@@ -26,14 +21,8 @@ def prune_dead_peers():
             now = time.time()
             for f_hash in list(swarm_db.keys()):
                 peers = swarm_db[f_hash]
-                to_remove = []
-                for pid, info in peers.items():
-                    if now - info['last_seen'] > TIMEOUT_LIMIT:
-                        to_remove.append(pid)
-                for pid in to_remove:
-                    # Opcional: imprimir log de desconexión
-                    # print(f"[{get_timestamp()}] Peer {pid} desconectado (Timeout).")
-                    del swarm_db[f_hash][pid]
+                to_remove = [pid for pid, info in peers.items() if now - info['last_seen'] > TIMEOUT_LIMIT]
+                for pid in to_remove: del swarm_db[f_hash][pid]
 
 def handle_peer(conn, addr):
     try:
@@ -44,43 +33,34 @@ def handle_peer(conn, addr):
         cmd = request.get('command')
         f_hash = request.get('file_hash')
         peer_id = request.get('peer_id')
-        
         response = {"status": "error"}
 
         if cmd == CMD_ANNOUNCE:
             filename = request.get('filename', 'Unknown')
             percent = request.get('percent', 0)
-            
             with lock:
-                if f_hash not in swarm_db:
-                    swarm_db[f_hash] = {}
-                # Guardamos el nombre del archivo si no lo teníamos
-                if f_hash not in file_names or file_names[f_hash] == 'Unknown':
+                if f_hash not in swarm_db: swarm_db[f_hash] = {}
+                if f_hash not in file_names or file_names[f_hash] == 'Unknown': 
                     file_names[f_hash] = filename
                 
                 role = "Seeder" if percent == 100 else "Leecher"
-                swarm_db[f_hash][peer_id] = {
-                    "percent": percent, 
-                    "role": role,
-                    "last_seen": time.time()
-                }
-
-            # Responder con peers DE ESE ARCHIVO
-            peer_list = []
-            peers_in_swarm = swarm_db.get(f_hash, {})
-            for pid, info in peers_in_swarm.items():
-                peer_list.append({"id": pid, "percent": info["percent"]})
-            
+                swarm_db[f_hash][peer_id] = {"percent": percent, "role": role, "last_seen": time.time()}
+                
+                peer_list = [{"id": pid, "percent": info["percent"]} for pid, info in swarm_db[f_hash].items()]
             response = {"status": "ok", "peers": peer_list}
+
+        elif cmd == CMD_EXIT_SWARM:
+            with lock:
+                if f_hash in swarm_db and peer_id in swarm_db[f_hash]:
+                    del swarm_db[f_hash][peer_id]
+            response = {"status": "ok"}
 
         elif cmd == CMD_LIST_FILES:
             catalog = []
             with lock:
                 for h, name in file_names.items():
                     count = len(swarm_db.get(h, {}))
-                    # Solo mostrar si hay alguien conectado
-                    if count > 0:
-                        catalog.append({"hash": h, "filename": name, "peers_count": count})
+                    if count > 0: catalog.append({"hash": h, "filename": name, "peers_count": count})
             response = {"status": "ok", "files": catalog}
 
         conn.send(json.dumps(response).encode('utf-8'))
@@ -88,50 +68,36 @@ def handle_peer(conn, addr):
     finally: conn.close()
 
 def monitor_display():
-    """Imprime la tabla de estado cada 3 segundos."""
     while True:
         time.sleep(3)
         os.system('cls' if os.name == 'nt' else 'clear')
-        print(f"┌──────────────────────────────────────────────────────────────┐")
-        print(f"│  TRACKER MONITOR - {get_timestamp():<34}│")
-        print(f"├──────────────────────────────────────────────────────────────┤")
-        print(f"│ {'ARCHIVO':<20} | {'PEER ID':<21} | {'%':<5} | {'ROL':<7} │")
-        print(f"├──────────────────────────────────────────────────────────────┤")
-        
+        print(f"┌── TRACKER MONITOR {get_timestamp()} ────────────────────────┐")
+        print(f"│ {'ARCHIVO':<15} | {'PEER ID':<20} | {'%':<5} | {'ROL':<7} │")
+        print(f"├──────────────────────────────────────────────────────────┤")
         with lock:
-            if not swarm_db:
-                print(f"│  {'--- Sin actividad ---':<58}│")
-            
+            if not swarm_db: print(f"│  {'--- Sin actividad ---':<54}│")
             for f_hash, peers in swarm_db.items():
-                fname = file_names.get(f_hash, "Unknown")[:20]
-                if not peers:
-                    continue
-                
-                first = True
+                fname = file_names.get(f_hash, "Unknown")[:15]
                 for pid, info in peers.items():
-                    # Solo imprimimos el nombre del archivo en la primera fila del grupo
-                    display_name = fname if first else ""
-                    print(f"│ {display_name:<20} | {pid:<21} | {info['percent']:<5} | {info['role']:<7} │")
-                    first = False
-                print(f"│ {'-'*60} │")
-        
-        print(f"└──────────────────────────────────────────────────────────────┘")
+                    print(f"│ {fname:<15} | {pid:<20} | {info['percent']:<5} | {info['role']:<7} │")
+        print(f"└──────────────────────────────────────────────────────────┘")
 
-def start_tracker():
-    import os
+def start_tracker(port):
     server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    server.bind(('0.0.0.0', TRACKER_PORT))
+    server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    server.bind(('0.0.0.0', port))
     server.listen(10)
+    print(f"[TRACKER] Iniciado en puerto {port}...")
     
-    t_prune = threading.Thread(target=prune_dead_peers, daemon=True)
-    t_prune.start()
+    # Hilos daemon
+    threading.Thread(target=prune_dead_peers, daemon=True).start()
+    threading.Thread(target=monitor_display, daemon=True).start()
     
-    t_monitor = threading.Thread(target=monitor_display, daemon=True)
-    t_monitor.start()
-
     while True:
         conn, addr = server.accept()
         threading.Thread(target=handle_peer, args=(conn, addr)).start()
 
 if __name__ == "__main__":
-    start_tracker()
+    # Si le pasamos puerto por consola, lo usa. Si no, usa el 5000 por defecto.
+    port = int(sys.argv[1]) if len(sys.argv) > 1 else 5000
+    start_tracker(port)
