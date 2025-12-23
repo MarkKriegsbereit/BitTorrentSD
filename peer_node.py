@@ -1,3 +1,4 @@
+# peer_node.py
 import socket
 import threading
 import time
@@ -50,95 +51,89 @@ class PeerNode:
         mgr['downloading'] = True
         threading.Thread(target=self._download_logic, args=(file_hash,), daemon=True).start()
 
+
+
+
     # --- LÓGICA SMART SWARM (VERSION DEFINITIVA / REACTIVA) ---
+
     def _download_logic(self, file_hash):
         mgr = self.managers.get(file_hash)
         fm = mgr['fm']
-        
-        # Reiniciar estadísticas para el Monitor
         self.download_stats = {} 
         
-        print(f"[*] Smart Swarm iniciado para: {mgr['filename']}")
+        print(f"[*] Smart Swarm V2 iniciado para: {mgr['filename']}")
         
-        # BUCLE PRINCIPAL: Se ejecuta mientras falten piezas
         while fm.get_missing_chunks() and mgr['downloading'] and self.running:
-            
-            # 1. ACTUALIZAR RADAR:
-            # Preguntamos al tracker en CADA vuelta. Esto es vital para ver nuevos peers al instante.
+            # 1. Obtener peers del Tracker
             peers = self.contact_tracker(CMD_ANNOUNCE, file_hash, mgr['trackers'])
             
-            # 2. FILTRAR Y VALIDAR:
-            # Solo peers que no sean yo y que tengan ALGO de progreso (>0%)
-            candidates = [p for p in peers if p['id'] != self.my_id and p['percent'] > 0]
-            
+            # 2. Filtrar candidatos (excluyéndome a mí)
+            candidates = [p for p in peers if p['id'] != self.my_id]
             if not candidates:
                 time.sleep(1)
                 continue
-            
-            # 3. ORDENAMIENTO KAMIKAZE (-1.0 para nuevos):
-            # Forzamos matemáticamente a probar primero a los desconocidos (Linux vecinos)
-            # antes que al Seeder conocido (Windows) que tiene latencia positiva (0.3s).
-            # -1.0 siempre es menor que cualquier número positivo.
-            candidates.sort(key=lambda p: self.peer_performance.get(p['id'], -1.0))
 
-            # 4. SELECCIÓN DE PIEZA (CAOS ORGANIZADO):
-            # Obtenemos las faltantes y las mezclamos para no ir en orden secuencial.
+            # 3. ESTRATEGIA DE CLASES:
+            # Separamos en Seeders (100%) y Vecinos (<100%)
+            seeders = [p for p in candidates if p['percent'] == 100]
+            leechers = [p for p in candidates if p['percent'] < 100 and p['percent'] > 0]
+            
+            # Ordenamos los leechers por rendimiento (los más rápidos primero)
+            leechers.sort(key=lambda p: self.peer_performance.get(p['id'], 0.5))
+            
+            # LISTA FINAL DE PRIORIDAD: ¡Vecinos primero! Luego Seeders.
+            priority_list = leechers + seeders
+
+            # 4. Seleccionar pieza RANDOM
             missing = fm.get_missing_chunks()
             random.shuffle(missing)
-            
-            # TRUCO DEL ALGORITMO:
-            # Solo intentamos bajar LA PRIMERA pieza de la lista barajada.
-            # Luego rompemos el ciclo 'for' (break) para volver al inicio del 'while' 
-            # y refrescar la lista de peers. Esto hace que el sistema sea ultra-reactivo.
-            chunk_to_try = missing[0] 
+            chunk_to_try = missing[0]
             
             chunk_downloaded = False
-            
-            # 5. RONDA DE INTENTOS:
-            for p in candidates:
-                # [DEBUG OPCIONAL] Descomentar para ver la decisión en consola
-                # score = self.peer_performance.get(p['id'], -1.0)
-                # print(f"[DECISION] Probando {p['id']} (Score: {score})")
 
+            # 5. Intentar descargar
+            for p in priority_list:
                 start_time = time.time()
                 
-                # Intentamos descargar
-                success = self.request_chunk(p['id'], chunk_to_try, file_hash, fm)
+                # Llamamos a la nueva versión que devuelve estados
+                result = self.request_chunk(p['id'], chunk_to_try, file_hash, fm)
                 
                 elapsed = time.time() - start_time
                 
-                # 6. FEEDBACK LOOP:
-                # Actualizamos si el peer es rápido o lento.
-                self.update_peer_score(p['id'], elapsed, success)
-                
-                if success:
-                    chunk_downloaded = True
+                if result == "success":
+                    # ¡ÉXITO!
+                    self.update_peer_score(p['id'], elapsed, success=True)
+                    self.download_stats[p['id']] = self.download_stats.get(p['id'], 0) + 1
                     
-                    # Registrar punto para el Monitor
-                    pid = p['id']
-                    self.download_stats[pid] = self.download_stats.get(pid, 0) + 1
-                    
-                    # 7. EL GRITO AL TRACKER (Chismoso Inmediato):
-                    # Avisamos asíncronamente que tenemos una pieza nueva.
-                    # Esto hace que aparezcamos en el radar de los demás inmediatamente.
-                    # Lo hacemos el 50% de las veces para no saturar la red innecesariamente.
-                    if random.random() < 0.5: 
+                    # Avisar al tracker (Chismoso)
+                    if random.random() < 0.3: 
                         threading.Thread(target=self.contact_tracker, 
-                                        args=(CMD_ANNOUNCE, file_hash, mgr['trackers']), 
-                                        daemon=True).start()
-                    
-                    # ¡Éxito! Rompemos el bucle de candidatos para volver a barajar y refrescar peers.
-                    break 
-            
-            # Si nadie tenía la pieza, pequeña pausa para no quemar CPU
-            if not chunk_downloaded:
-                time.sleep(0.1) 
+                                         args=(CMD_ANNOUNCE, file_hash, mgr['trackers']), 
+                                         daemon=True).start()
+                    chunk_downloaded = True
+                    break # Salir del for para barajar piezas de nuevo
 
-        # FIN DE LA DESCARGA
+                elif result == "missing":
+                    # El peer está vivo, pero no tenía la pieza.
+                    # NO LO PENALIZAMOS (no sumamos tiempo a su score).
+                    # Solo pasamos al siguiente candidato.
+                    pass
+
+                elif result == "network_error":
+                    # Fallo de red, a este sí lo penalizamos
+                    self.update_peer_score(p['id'], elapsed, success=False)
+
+            if not chunk_downloaded:
+                time.sleep(0.1)
+
+        # FIN
         if not fm.get_missing_chunks():
             mgr['downloading'] = False
             self.contact_tracker(CMD_ANNOUNCE, file_hash, mgr['trackers'])
             print(f"\n[★] ¡DESCARGA COMPLETA!: {mgr['filename']}")
+
+
+
 
     def update_peer_score(self, peer_id, time_taken, success):
         """
@@ -203,6 +198,9 @@ class PeerNode:
                 threading.Thread(target=self.handle_upload, args=(conn,)).start()
         except Exception as e: print(f"[Server Error] {e}")
 
+
+
+
     def handle_upload(self, conn):
         try:
             raw = conn.recv(BUFFER_SIZE).decode()
@@ -213,10 +211,21 @@ class PeerNode:
             if cmd == CMD_REQUEST_CHUNK:
                 mgr = self.managers.get(req.get('file_hash'))
                 if mgr:
+                
+                    # --- MODIFICACIÓN 1: FRENO AL SEEDER ---
+                    # Si soy Seeder (tengo el 100%), me duermo un poco.
+                    # Si soy Leecher (tengo <100%), respondo RÁPIDO para ganar reputación.
+                    if mgr['fm'].get_progress_percentage() == 100:
+                        time.sleep(0.5) # Simula que el servidor está saturado o lejos
+                    # ----------------------------------------
+                         
                     data = mgr['fm'].read_chunk(req.get('chunk_index'))
                     if data:
                         conn.send(json.dumps({"status": "ok", "size": len(data)}).encode() + b'\n' + data)
-                        return
+                    else:
+                        # Avisar explícitamente que no tenemos la pieza
+                        conn.send(json.dumps({"status": "missing"}).encode() + b'\n')
+                    return
             elif cmd == CMD_GET_METADATA:
                 mgr = self.managers.get(req.get('file_hash'))
                 if mgr:
@@ -230,38 +239,25 @@ class PeerNode:
 
 
     # --- CLIENTE RED ---
+    # En peer_node.py -> request_chunk
     def request_chunk(self, peer_addr, idx, file_hash, fm):
-        # Separar IP y Puerto
         target_ip, target_port = peer_addr.split(':')
-        
-        # LISTA DE INTENTOS DE CONEXIÓN:
-        # 1. Intentamos la IP oficial que dice el Tracker.
-        # 2. Si falla, intentamos SIEMPRE '127.0.0.1'.
-        #    Esto soluciona el bloqueo cuando los peers están en la misma PC.
         ips_to_try = [target_ip, '127.0.0.1']
-        
         socket_connected = None
         
         for ip_candidate in ips_to_try:
             try:
                 s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                s.settimeout(1.0) # Timeout rápido (1 segundo)
+                s.settimeout(2.0) # Un poco más de tolerancia
                 s.connect((ip_candidate, int(target_port)))
-                
-                # Si llegamos aquí, ¡conectó!
                 socket_connected = s
-                # [Opcional] Descomenta para ver si está usando el truco
-                # if ip_candidate == '127.0.0.1': print(f"[RED] ¡Salvado por localhost en puerto {target_port}!")
                 break 
             except:
                 s.close()
-                continue # Falló la IP normal, probamos la siguiente (localhost)
+                continue
 
-        # Si después de probar todo no hay conexión, nos rendimos
-        if not socket_connected:
-            return False
+        if not socket_connected: return "network_error" # Retornamos estado, no solo False
 
-        # Si conectó, procedemos a pedir la pieza normalmente
         try:
             s = socket_connected
             msg = {"command": CMD_REQUEST_CHUNK, "file_hash": file_hash, "chunk_index": idx}
@@ -270,20 +266,24 @@ class PeerNode:
             f = s.makefile('rb')
             head_line = f.readline()
             
-            if not head_line: return False
+            if not head_line: return "network_error"
             
             head = json.loads(head_line)
+            
             if head['status'] == 'ok':
                 chunk_data = f.read(head['size'])
                 if len(chunk_data) == head['size']:
                     fm.write_chunk(idx, chunk_data)
-                    return True
+                    return "success"
+            elif head['status'] == 'missing':
+                return "missing" # El peer está vivo, pero no tiene la pieza
+                
         except:
-            return False
+            return "network_error"
         finally:
             socket_connected.close()
             
-        return False
+        return "network_error"
         
         
 
