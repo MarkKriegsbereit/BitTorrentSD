@@ -28,7 +28,7 @@ class PeerNode:
         
         # Rendimiento de peers para balanceo de carga
         self.peer_performance = {} 
-        
+        self.download_stats = {}
         self.running = True
 
         print(f"[*] MI IDENTIDAD: {self.my_id}")
@@ -54,14 +54,17 @@ class PeerNode:
     def _download_logic(self, file_hash):
         mgr = self.managers.get(file_hash)
         fm = mgr['fm']
+        
+        # NUEVO: Reiniciar estadísticas al empezar una descarga nueva
+        self.download_stats = {} 
+        
         print(f"[*] Smart Swarm iniciado para: {mgr['filename']}")
         
         while fm.get_missing_chunks() and mgr['downloading'] and self.running:
             peers = self.contact_tracker(CMD_ANNOUNCE, file_hash, mgr['trackers'])
             candidates = [p for p in peers if p['id'] != self.my_id and p['percent'] > 0]
             
-            if not candidates: 
-                time.sleep(2); continue
+            if not candidates: time.sleep(2); continue
             
             # Ordenar por velocidad (Smart Load Balancing)
             candidates.sort(key=lambda p: self.peer_performance.get(p['id'], 1.0))
@@ -79,17 +82,23 @@ class PeerNode:
                     
                     if success:
                         chunk_downloaded = True
-                        # print(f"Pieza {idx} bajada de {p['id']}") # <--- COMENTA ESTO PARA MÁS VELOCIDAD
-                        break
+                        
+                        # NUEVO: ¡Anotar punto para este peer!
+                        pid = p['id']
+                        self.download_stats[pid] = self.download_stats.get(pid, 0) + 1
+                        
+                        break 
                 
-                if not chunk_downloaded: time.sleep(0.1) 
+                if not chunk_downloaded: time.sleep(0.01) 
 
-            time.sleep(0.1)
+            # Sin sleep aquí para máxima velocidad
+            pass
         
         if not fm.get_missing_chunks():
             mgr['downloading'] = False
             self.contact_tracker(CMD_ANNOUNCE, file_hash, mgr['trackers'])
             print(f"\n[★] ¡DESCARGA COMPLETA!: {mgr['filename']}")
+
 
     def update_peer_score(self, peer_id, time_taken, success):
         current_avg = self.peer_performance.get(peer_id, 0.5)
@@ -98,6 +107,8 @@ class PeerNode:
         else:
             new_score = current_avg + 3.0 # Castigo por fallo
         self.peer_performance[peer_id] = new_score
+
+
 
     # --- GESTIÓN ---
     def add_manager(self, filename, file_hash, size, trackers):
@@ -310,18 +321,35 @@ class PeerNode:
         try:
             while True:
                 os.system('cls' if os.name == 'nt' else 'clear')
-                print(f"┌── MONITOR ({len(self.managers)} archivos) ─────────────────┐")
+                print(f"\n┌── ESTADO DE ARCHIVOS ────────────────────────────┐")
                 with self.managers_lock:
+                    if not self.managers: print(" [Sin actividad]")
                     for h, m in self.managers.items():
                         pct = m['fm'].get_progress_percentage()
-                        bar = "█" * int(pct//5) + "░" * (20 - int(pct//5))
-                        state = "BAJANDO" if m['downloading'] else ("SEEDING" if pct==100 else "PAUSA")
-                        print(f" {m['filename'][:15]:<15} [{bar}] {pct}% {state}")
+                        # Barra de carga visual
+                        filled = int(pct / 5)
+                        bar = "█" * filled + "░" * (20 - filled)
+                        state = "BAJANDO ⬇" if m['downloading'] else ("SEEDING ⬆" if pct==100 else "PAUSA ⏸")
+                        print(f" {m['filename'][:15]:<15} [{bar}] {pct:>3.0f}% {state}")
                 
-                print("\n┌── RENDIMIENTO DE PEERS (Ping) ───────────────┐")
-                if not self.peer_performance: print(" (Calculando...)")
-                for pid, score in list(self.peer_performance.items())[:5]:
-                    print(f" Peer {pid:<20} : {score:.4f} seg")
+                print(f"\n┌── BALANCEO DE CARGA (Quién me alimenta) ─────────┐")
+                print(f"│ {'PEER ID':<20} | {'LATENCIA':<9} | {'PIEZAS':<8} │")
+                print(f"├──────────────────────┼───────────┼──────────┤")
+                
+                # Combinamos stats y performance para mostrar todo
+                all_peers = set(list(self.peer_performance.keys()) + list(self.download_stats.keys()))
+                
+                if not all_peers:
+                    print(f"│ {'(Esperando datos...)':<43} │")
+                
+                for pid in all_peers:
+                    lat = self.peer_performance.get(pid, 0.0)
+                    chunks = self.download_stats.get(pid, 0)
+                    # Formato bonito
+                    print(f"│ {pid:<20} | {lat:.4f}s  | {chunks:<8} │")
+                
+                print(f"└──────────────────────┴───────────┴──────────┘")
+                    
                 time.sleep(0.5)
         except KeyboardInterrupt: pass
 
