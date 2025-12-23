@@ -3,7 +3,7 @@ import hashlib
 import socket
 
 BLOCK_SIZE = 512 * 1024  # 512 KB
-BUFFER_SIZE = 8192       # Aumentamos un poco el buffer
+BUFFER_SIZE = 65536       # Aumentamos un poco el buffer
 
 # Puertos
 TRACKER_PORT = 5000

@@ -12,7 +12,7 @@ from file_manager import FileManager
 
 # --- CONFIGURACIÓN ---
 KNOWN_TRACKERS = [] 
-TIME_DELAY = 0.05   # Velocidad de simulación
+TIME_DELAY = 0   # Velocidad de simulación
 
 class PeerNode:
     def __init__(self, port, tracker_ip_hint):
@@ -79,7 +79,8 @@ class PeerNode:
                     
                     if success:
                         chunk_downloaded = True
-                        break 
+                        # print(f"Pieza {idx} bajada de {p['id']}") # <--- COMENTA ESTO PARA MÁS VELOCIDAD
+                        break
                 
                 if not chunk_downloaded: time.sleep(0.1) 
 
