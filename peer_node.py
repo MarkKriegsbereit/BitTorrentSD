@@ -51,53 +51,97 @@ class PeerNode:
         threading.Thread(target=self._download_logic, args=(file_hash,), daemon=True).start()
 
     # --- LÓGICA SMART SWARM ---
+    # --- LÓGICA SMART SWARM (AGRESIVA / KAMIKAZE) ---
     def _download_logic(self, file_hash):
         mgr = self.managers.get(file_hash)
         fm = mgr['fm']
         
-        # NUEVO: Reiniciar estadísticas al empezar una descarga nueva
+        # Reiniciar marcador de "goles" (piezas bajadas) para el Monitor
         self.download_stats = {} 
         
         print(f"[*] Smart Swarm iniciado para: {mgr['filename']}")
         
         while fm.get_missing_chunks() and mgr['downloading'] and self.running:
+            # 1. Obtener lista de candidatos del Tracker
             peers = self.contact_tracker(CMD_ANNOUNCE, file_hash, mgr['trackers'])
+            
+            # 2. Filtrar: No soy yo y tienen ALGO del archivo (>0%)
             candidates = [p for p in peers if p['id'] != self.my_id and p['percent'] > 0]
             
-            if not candidates: time.sleep(2); continue
+            if not candidates: 
+                time.sleep(2); continue
             
-            # Ordenar por velocidad (Smart Load Balancing)
-            candidates.sort(key=lambda p: self.peer_performance.get(p['id'], 1.0))
+            # [DEBUG] Ver a quiénes estamos considerando (para comprobar si ve a los Linux)
+            # print(f"[DEBUG] Candidatos visibles: {[p['id'] for p in candidates]}")
 
+            # 3. ORDENAMIENTO AGRESIVO (Kamikaze)
+            # - Peers Conocidos: Tienen su latencia real (ej. 0.3s, 0.001s)
+            # - Peers Nuevos: Les damos -1.0 artificialmente.
+            # - Como sort() ordena de MENOR a MAYOR, -1.0 siempre gana a 0.X
+            # ESTO FUERZA A PROBAR A LOS VECINOS NUEVOS PRIMERO.
+            candidates.sort(key=lambda p: self.peer_performance.get(p['id'], -1.0))
+
+            # 4. Iterar piezas faltantes
             for idx in fm.get_missing_chunks():
                 if not mgr['downloading'] or not self.running: break
+                
                 chunk_downloaded = False
                 
+                # Intentar con los candidatos en el orden priorizado
                 for p in candidates:
                     start_time = time.time()
+                    
+                    # Intentamos descargar la pieza
                     success = self.request_chunk(p['id'], idx, file_hash, fm)
+                    
                     elapsed = time.time() - start_time
                     
+                    # 5. ACTUALIZAR REPUTACIÓN (Feedback Loop)
+                    # Aquí el -1.0 se convertirá en la latencia real (ej. 0.0005s)
                     self.update_peer_score(p['id'], elapsed, success)
                     
                     if success:
                         chunk_downloaded = True
                         
-                        # NUEVO: ¡Anotar punto para este peer!
+                        # 6. REGISTRAR EN EL MONITOR
                         pid = p['id']
                         self.download_stats[pid] = self.download_stats.get(pid, 0) + 1
                         
-                        break 
+                        break # Ya tenemos la pieza, pasamos a la siguiente
                 
-                if not chunk_downloaded: time.sleep(0.01) 
+                # Si nadie tenía esta pieza, pequeña pausa para no quemar CPU
+                if not chunk_downloaded:
+                    time.sleep(0.01) 
 
-            # Sin sleep aquí para máxima velocidad
+            # Sin sleep largo aquí para máxima velocidad de ráfaga
             pass
         
         if not fm.get_missing_chunks():
             mgr['downloading'] = False
             self.contact_tracker(CMD_ANNOUNCE, file_hash, mgr['trackers'])
             print(f"\n[★] ¡DESCARGA COMPLETA!: {mgr['filename']}")
+
+    def update_peer_score(self, peer_id, time_taken, success):
+        """
+        Ajusta dinámicamente el ranking.
+        Si era -1.0 (nuevo), aquí se sobrescribe con la realidad.
+        """
+        # Si no existe, iniciamos en 0.5 (neutro) para el cálculo
+        current_avg = self.peer_performance.get(peer_id, 0.5)
+        
+        # Si venía del "truco" -1.0, ignoramos ese valor y usamos el tiempo actual directo
+        if current_avg < 0:
+            current_avg = time_taken
+
+        if success:
+            # Suavizado exponencial: El nuevo tiempo pesa un 30%
+            new_score = (current_avg * 0.7) + (time_taken * 0.3)
+        else:
+            # CASTIGO: Si falla (timeout), le sumamos 3 segundos.
+            # Esto lo manda al final de la cola inmediatamente.
+            new_score = current_avg + 3.0
+            
+        self.peer_performance[peer_id] = new_score
 
 
     def update_peer_score(self, peer_id, time_taken, success):
