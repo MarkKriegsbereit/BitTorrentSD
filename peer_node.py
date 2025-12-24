@@ -36,8 +36,18 @@ class PeerNode:
         print(f"[*] MI IDENTIDAD: {self.my_id}")
         print(f"[*] CARPETA: {self.folder}")
         
+        # --- CORRECCIÓN MULTI-TRACKER ---
         global KNOWN_TRACKERS
-        KNOWN_TRACKERS = [(tracker_ip_hint, 5000)]
+        # Si no hay trackers definidos, usamos el hint. 
+        # Si quisieras poner trackers fijos hardcodeados, defínelos arriba en KNOWN_TRACKERS = [...]
+        if not KNOWN_TRACKERS:
+            # Por defecto añadimos el puerto 5000. 
+            # Si quieres redundancia automática en la misma IP, podrías añadir más puertos.
+            KNOWN_TRACKERS.append((tracker_ip_hint, 5000))
+            KNOWN_TRACKERS.append((tracker_ip_hint, 5001))
+        # --------
+        
+        
 
         self.scan_folder()
 
@@ -316,29 +326,69 @@ class PeerNode:
     def contact_tracker(self, command, file_hash=None, trackers=None):
         if not trackers: trackers = KNOWN_TRACKERS
         combined_peers = []
+        combined_files = [] # Para CMD_LIST_FILES
+        success_count = 0
+        
+        # Iteramos por TODOS los trackers conocidos
         for ip, port in trackers:
+            s = None
             try:
                 s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
                 s.settimeout(2)
                 s.connect((ip, port))
+                
                 req = {"command": command, "peer_id": self.my_id}
                 if file_hash:
                     req["file_hash"] = file_hash
                     mgr = self.managers.get(file_hash)
                     if mgr: req.update({"filename": mgr["filename"], "percent": mgr["fm"].get_progress_percentage()})
+                
                 s.send(json.dumps(req).encode())
-                resp = json.loads(s.recv(BUFFER_SIZE).decode())
-                s.close()
-                if resp['status'] == 'ok':
-                    if command == CMD_LIST_FILES: return resp['files']
-                    if command == CMD_ANNOUNCE and 'peers' in resp: combined_peers.extend(resp['peers'])
-            except: pass
+                raw_resp = s.recv(BUFFER_SIZE).decode()
+                if not raw_resp: continue
+                
+                resp = json.loads(raw_resp)
+                
+                if resp.get('status') == 'ok':
+                    success_count += 1
+                    # Si pedimos lista de archivos, acumulamos resultados de todos los trackers
+                    if command == CMD_LIST_FILES and 'files' in resp:
+                        combined_files.extend(resp['files'])
+                    
+                    # Si es un anuncio, acumulamos peers de todos los trackers
+                    if command == CMD_ANNOUNCE and 'peers' in resp:
+                        combined_peers.extend(resp['peers'])
+            except:
+                # Si un tracker falla, simplemente probamos el siguiente
+                pass
+            finally:
+                if s: s.close()
+        
+        # Procesar resultados combinados
+        if command == CMD_LIST_FILES:
+            # Eliminar duplicados de archivos basados en hash
+            seen_hashes = set()
+            unique_files = []
+            for f in combined_files:
+                if f['hash'] not in seen_hashes:
+                    unique_files.append(f)
+                    seen_hashes.add(f['hash'])
+            return unique_files
+            
         if command == CMD_ANNOUNCE:
-            seen = set(); unique = []
+            # Eliminar duplicados de peers
+            seen = set()
+            unique_peers = []
             for p in combined_peers:
-                if p['id'] not in seen: unique.append(p); seen.add(p['id'])
-            return unique
+                if p['id'] not in seen:
+                    unique_peers.append(p)
+                    seen.add(p['id'])
+            return unique_peers
+            
         return []
+
+
+
 
     def heartbeat_loop(self):
         while self.running:
