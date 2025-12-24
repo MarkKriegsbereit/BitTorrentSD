@@ -51,10 +51,18 @@ def handle_peer(conn, addr):
             response = {"status": "ok", "peers": peer_list}
 
         elif cmd == CMD_EXIT_SWARM:
-            with lock:
-                if f_hash in swarm_db and peer_id in swarm_db[f_hash]:
-                    del swarm_db[f_hash][peer_id]
-            response = {"status": "ok"}
+                peer_id = req.get('peer_id')
+                print(f"👋 Peer {peer_id} abandonando el enjambre voluntariamente.")
+                
+                # Recorremos TODOS los archivos que gestiona el tracker
+                # y borramos a este peer de cada lista donde aparezca.
+                with self.lock: # Usa lock si tienes threading
+                    for f_hash in self.torrents:
+                        # Reconstruimos la lista excluyendo al peer que se va
+                        self.torrents[f_hash] = [p for p in self.torrents[f_hash] if p['id'] != peer_id]
+                
+                # Confirmamos (opcional, pero buena práctica)
+                conn.send(json.dumps({"status": "ok"}).encode())
 
         elif cmd == CMD_LIST_FILES:
             catalog = []

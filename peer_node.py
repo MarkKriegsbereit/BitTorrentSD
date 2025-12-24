@@ -143,14 +143,25 @@ class PeerNode:
                 print("🚨 ERROR CRÍTICO: La firma digital del archivo no coincide.")
                 print("🗑️ El archivo está corrupto. Eliminando del disco...")
                 
-                # Cerramos cualquier handle y borramos
-                try:
+                # 1. Borrar el video corrupto
+                if os.path.exists(full_path):
                     os.remove(full_path)
-                    # Opcional: Borrar también el progreso para obligar a re-descargar
-                    os.remove(full_path + ".progress") 
-                except:
-                    pass
-                print("⚠️ Archivo eliminado por seguridad.")
+                
+                # 2. Borrar archivo de progreso
+                if os.path.exists(full_path + ".progress"):
+                    os.remove(full_path + ".progress")
+                
+                # 3. Borrar el JSON (Para que no crea que somos Seeder al reiniciar)
+                json_path = os.path.join(self.folder, f"{mgr['filename']}.json")
+                if os.path.exists(json_path):
+                    os.remove(json_path)
+
+                # 4. Eliminar de la memoria RAM (Para que el Monitor se actualice ya)
+                with self.managers_lock:
+                    if file_hash in self.managers:
+                        del self.managers[file_hash]
+
+                print("⚠️ Archivo y metadatos eliminados por seguridad.")
             # ---------------------------------
 
     def update_peer_score(self, peer_id, time_taken, success):
@@ -413,7 +424,7 @@ class PeerNode:
 
     def heartbeat_loop(self):
         while self.running:
-            time.sleep(5)
+            time.sleep(2)
             self.scan_folder()
             with self.managers_lock: hashes = list(self.managers.keys())
             for h in hashes:
@@ -529,6 +540,13 @@ class PeerNode:
             elif op == '2': self.search_tracker()
             elif op == '3': self.monitor()
             elif op == '4': self.running = False; sys.exit()
+                print("👋 Cerrando sesión en el Tracker...")
+                # Avisar a todos los trackers que me voy
+                # Enviamos 'None' como hash para indicar que me voy de TODOS los swarms
+                self.contact_tracker(CMD_EXIT_SWARM, file_hash=None, trackers=KNOWN_TRACKERS)
+                
+                self.running = False
+                sys.exit()
             # Agregamos la llamada lógica
             elif op == '5': self.sabotage_file()
             else: print("Opción no válida")
