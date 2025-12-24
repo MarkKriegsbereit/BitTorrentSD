@@ -130,7 +130,28 @@ class PeerNode:
         if not fm.get_missing_chunks():
             mgr['downloading'] = False
             self.contact_tracker(CMD_ANNOUNCE, file_hash, mgr['trackers'])
-            print(f"\n[★] ¡DESCARGA COMPLETA!: {mgr['filename']}")
+            print(f"\n[★] DESCARGA FINALIZADA: {mgr['filename']}")
+            
+            # --- BLOQUE DE SEGURIDAD FINAL ---
+            print("🕵️ Iniciando validación final post-ensamblaje...")
+            full_path = os.path.join(self.folder, mgr['filename'])
+            
+            # Usamos 'file_hash' porque es el hash global original del torrent
+            if self.verify_integrity(full_path, file_hash):
+                print(f"✅ ARCHIVO GUARDADO Y VERIFICADO: {mgr['filename']}")
+            else:
+                print("🚨 ERROR CRÍTICO: La firma digital del archivo no coincide.")
+                print("🗑️ El archivo está corrupto. Eliminando del disco...")
+                
+                # Cerramos cualquier handle y borramos
+                try:
+                    os.remove(full_path)
+                    # Opcional: Borrar también el progreso para obligar a re-descargar
+                    os.remove(full_path + ".progress") 
+                except:
+                    pass
+                print("⚠️ Archivo eliminado por seguridad.")
+            # ---------------------------------
 
     def update_peer_score(self, peer_id, time_taken, success):
         """ Sistema de Puntuación Dinámica """
@@ -461,6 +482,38 @@ class PeerNode:
             
         except Exception as e:
             print(f"❌ Error: {e}")
+            
+            
+            
+    def verify_integrity(self, filepath, expected_hash):
+    """
+    Calcula el hash SHA-256 del archivo descargado y lo compara con el original.
+    Retorna True si son idénticos, False si el archivo está corrupto.
+    """
+    print(f"🕵️ Verificando integridad de: {filepath}...")
+    
+    sha256_hash = hashlib.sha256()
+    
+    try:
+        with open(filepath, "rb") as f:
+            # Leemos por bloques para no saturar la RAM
+            for byte_block in iter(lambda: f.read(4096), b""):
+                sha256_hash.update(byte_block)
+        
+        calculated_hash = sha256_hash.hexdigest()
+        
+        if calculated_hash == expected_hash:
+            print("✅ INTEGRIDAD APROBADA. El archivo es auténtico.")
+            return True
+        else:
+            print("🚨 ALERTA DE SEGURIDAD: HASH MISMATCH")
+            print(f"   Esperado: {expected_hash}")
+            print(f"   Calculado: {calculated_hash}")
+            return False
+            
+    except Exception as e:
+        print(f"❌ Error al verificar archivo: {e}")
+        return False
 
 
 
