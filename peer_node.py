@@ -355,21 +355,50 @@ class PeerNode:
         
         
 
+    # En peer_node.py
     def fetch_metadata_from_swarm(self, file_hash, peers_list):
         print(f"[*] Buscando metadatos...")
         for p_data in peers_list:
             if p_data['id'] == self.my_id: continue 
-            try:
-                ip, port = p_data['id'].split(':')
-                s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                s.settimeout(2)
-                s.connect((ip, int(port)))
-                s.send(json.dumps({"command": CMD_GET_METADATA, "file_hash": file_hash}).encode())
-                resp = json.loads(s.recv(BUFFER_SIZE).decode())
-                s.close()
-                if resp.get('status') == 'ok': return resp
-            except: pass
+            
+            target_ip, target_port = p_data['id'].split(':')
+            
+            # Intentamos IP real y luego Localhost (por si estás en la misma PC)
+            ips_to_try = [target_ip, '127.0.0.1']
+            
+            for ip_cand in ips_to_try:
+                s = None
+                try:
+                    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                    s.settimeout(3) # Damos 3 segundos para responder
+                    s.connect((ip_cand, int(target_port)))
+                    
+                    # --- CORRECCIÓN AQUÍ: AÑADIR EL SALTO DE LÍNEA ---
+                    msg = {"command": CMD_GET_METADATA, "file_hash": file_hash}
+                    s.send(json.dumps(msg).encode() + b'\n') 
+                    
+                    # --- CORRECCIÓN AQUÍ: LEER CON MAKEFILE ---
+                    f = s.makefile('rb')
+                    line = f.readline()
+                    
+                    if not line: 
+                        s.close()
+                        continue
+                        
+                    resp = json.loads(line)
+                    s.close()
+                    
+                    if resp.get('status') == 'ok': 
+                        return resp
+                        
+                except Exception as e:
+                    if s: s.close()
+                    pass
+                    
         return None
+        
+        
+        
 
     def contact_tracker(self, command, file_hash=None, trackers=None):
         if not trackers: trackers = KNOWN_TRACKERS
