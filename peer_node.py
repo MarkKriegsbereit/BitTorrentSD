@@ -539,7 +539,7 @@ class PeerNode:
             if op == '1': self.convert_local_file()
             elif op == '2': self.search_tracker()
             elif op == '3': self.monitor()
-            elif op == '4': self.running = False; sys.exit()
+            elif op == '4': 
                 print("👋 Cerrando sesión en el Tracker...")
                 # Avisar a todos los trackers que me voy
                 # Enviamos 'None' como hash para indicar que me voy de TODOS los swarms
