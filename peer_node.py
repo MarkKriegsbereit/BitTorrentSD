@@ -20,7 +20,7 @@ class PeerNode:
         self.my_port = port
         self.my_ip = get_local_ip() 
         self.my_id = f"{self.my_ip}:{port}"
-        
+         
         self.folder = f"peer_{port}"
         if not os.path.exists(self.folder): os.makedirs(self.folder)
 
@@ -31,6 +31,9 @@ class PeerNode:
         self.peer_performance = {} 
         self.download_stats = {}
         self.running = True
+        
+        self.socket_pool = {} # Cache de conexiones {peer_id: socket_obj}
+        self.banned_peers = {} # {peer_id: tiempo_expiracion}
 
         print(f"[*] MI IDENTIDAD: {self.my_id}")
         print(f"[*] CARPETA: {self.folder}")
@@ -200,90 +203,155 @@ class PeerNode:
 
 
 
-
     def handle_upload(self, conn):
+        """
+        Servidor optimizado: Mantiene la conexión abierta (Keep-Alive)
+        y soporta ráfagas de peticiones.
+        """
+        peer_addr = conn.getpeername()
+        conn.settimeout(60) # Si nadie habla en 60s, cerramos para ahorrar recursos
+        
         try:
-            raw = conn.recv(BUFFER_SIZE).decode()
-            if not raw: return
-            req = json.loads(raw)
-            cmd = req.get('command')
-            
-            if cmd == CMD_REQUEST_CHUNK:
-                mgr = self.managers.get(req.get('file_hash'))
-                if mgr:
-                
-                    # --- MODIFICACIÓN 1: FRENO AL SEEDER ---
-                    # Si soy Seeder (tengo el 100%), me duermo un poco.
-                    # Si soy Leecher (tengo <100%), respondo RÁPIDO para ganar reputación.
-                    if mgr['fm'].get_progress_percentage() == 100:
-                        time.sleep(0.5) # Simula que el servidor está saturado o lejos
-                    # ----------------------------------------
-                         
-                    data = mgr['fm'].read_chunk(req.get('chunk_index'))
-                    if data:
-                        conn.send(json.dumps({"status": "ok", "size": len(data)}).encode() + b'\n' + data)
-                    else:
-                        # Avisar explícitamente que no tenemos la pieza
-                        conn.send(json.dumps({"status": "missing"}).encode() + b'\n')
-                    return
-            elif cmd == CMD_GET_METADATA:
-                mgr = self.managers.get(req.get('file_hash'))
-                if mgr:
-                    meta = {"status": "ok", "filename": mgr['filename'], "filesize": mgr['fm'].total_size, "trackers": mgr['trackers']}
-                    conn.send(json.dumps(meta).encode())
-                    return
-            conn.send(json.dumps({"status": "error"}).encode() + b'\n')
-        except: pass
-        finally: conn.close()
+            buffer = ""
+            while self.running:
+                try:
+                    # Leemos datos. Al ser TCP, pueden llegar paquetes pegados o fragmentados.
+                    # Para simplificar, leemos bloque a bloque y buscamos el salto de línea.
+                    chunk = conn.recv(4096).decode('utf-8')
+                    if not chunk: break
+                    buffer += chunk
+                except socket.timeout:
+                    break
+                except:
+                    break
+
+                # Procesar comandos en el buffer (separados por \n)
+                while '\n' in buffer:
+                    msg_str, buffer = buffer.split('\n', 1)
+                    if not msg_str.strip(): continue
+                    
+                    try:
+                        req = json.loads(msg_str)
+                    except: continue # JSON basura, ignorar
+
+                    cmd = req.get('command')
+                    
+                    if cmd == CMD_REQUEST_CHUNK:
+                        mgr = self.managers.get(req.get('file_hash'))
+                        if mgr:
+                            # Simulación de latencia SOLO para el Seeder al 100%
+                            if mgr['fm'].get_progress_percentage() == 100: time.sleep(0.5)
+
+                            data = mgr['fm'].read_chunk(req.get('chunk_index'))
+                            if data:
+                                # Enviamos encabezado + nueva línea + datos binarios
+                                header = json.dumps({"status": "ok", "size": len(data)})
+                                conn.send(header.encode() + b'\n' + data)
+                            else:
+                                conn.send(json.dumps({"status": "missing"}).encode() + b'\n')
+                        else:
+                            conn.send(json.dumps({"status": "error"}).encode() + b'\n')
+                            
+                    elif cmd == CMD_GET_METADATA:
+                        # (Igual que antes, pero asegurando el \n al final)
+                        mgr = self.managers.get(req.get('file_hash'))
+                        if mgr:
+                            meta = {"status": "ok", "filename": mgr['filename'], "filesize": mgr['fm'].total_size, "trackers": mgr['trackers']}
+                            conn.send(json.dumps(meta).encode() + b'\n')
+        except:
+            pass
+        finally:
+            conn.close()
 
 
 
     # --- CLIENTE RED ---
-    # En peer_node.py -> request_chunk
-    def request_chunk(self, peer_addr, idx, file_hash, fm):
-        target_ip, target_port = peer_addr.split(':')
-        ips_to_try = [target_ip, '127.0.0.1']
-        socket_connected = None
+
+    def request_chunk(self, peer_id, idx, file_hash, fm):
+        # 1. SEGURIDAD: Chequear ban list
+        if peer_id in self.banned_peers:
+            if time.time() < self.banned_peers[peer_id]:
+                return "banned" # Ignorar silenciosamente
+            else:
+                del self.banned_peers[peer_id] # Expiró el castigo
+
+        # 2. VELOCIDAD: Obtener socket del pool o crear uno nuevo
+        s = self.socket_pool.get(peer_id)
         
-        for ip_candidate in ips_to_try:
-            try:
-                s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                s.settimeout(2.0) # Un poco más de tolerancia
-                s.connect((ip_candidate, int(target_port)))
-                socket_connected = s
-                break 
-            except:
-                s.close()
-                continue
-
-        if not socket_connected: return "network_error" # Retornamos estado, no solo False
-
-        try:
-            s = socket_connected
-            msg = {"command": CMD_REQUEST_CHUNK, "file_hash": file_hash, "chunk_index": idx}
-            s.send(json.dumps(msg).encode())
+        if s is None:
+            # Crear conexión nueva
+            ip, port = peer_id.split(':')
+            ips_to_try = [ip, '127.0.0.1'] # Fallback a localhost
+            for ip_cand in ips_to_try:
+                try:
+                    s_new = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                    s_new.settimeout(4.0) 
+                    s_new.connect((ip_cand, int(port)))
+                    s = s_new
+                    self.socket_pool[peer_id] = s # ¡Guardar en caché!
+                    break
+                except: pass
             
-            f = s.makefile('rb')
+            if s is None: return "network_error"
+
+        # 3. TRANSACCIÓN
+        try:
+            # Enviar petición con salto de línea (\n) para que el server sepa dónde termina el JSON
+            msg = {"command": CMD_REQUEST_CHUNK, "file_hash": file_hash, "chunk_index": idx}
+            s.send(json.dumps(msg).encode() + b'\n') 
+            
+            # Usamos makefile para leer la línea del header cómodamente
+            # (rb es importante porque luego vienen datos binarios)
+            f = s.makefile('rb') 
             head_line = f.readline()
             
-            if not head_line: return "network_error"
+            if not head_line: 
+                self.close_peer_socket(peer_id)
+                return "network_error"
             
-            head = json.loads(head_line)
+            try:
+                head = json.loads(head_line)
+            except:
+                self.close_peer_socket(peer_id)
+                return "network_error"
             
-            if head['status'] == 'ok':
+            if head.get('status') == 'ok':
+                # Leer exactamente los bytes que dijo el header
                 chunk_data = f.read(head['size'])
-                if len(chunk_data) == head['size']:
-                    fm.write_chunk(idx, chunk_data)
-                    return "success"
-            elif head['status'] == 'missing':
-                return "missing" # El peer está vivo, pero no tiene la pieza
+                if len(chunk_data) != head['size']:
+                    self.close_peer_socket(peer_id)
+                    return "network_error"
+
+                # 4. SEGURIDAD: VERIFICACIÓN DE HASH (SHA-256)
+                expected_hash = self.get_expected_hash(file_hash, idx)
                 
-        except:
+                # Si tenemos el hash de referencia, lo comparamos
+                if expected_hash:
+                    calculated_hash = hashlib.sha256(chunk_data).hexdigest()
+                    if calculated_hash != expected_hash:
+                        print(f"\n[!!!] ALERTA DE SEGURIDAD: {peer_id} envió datos corruptos/maliciosos.")
+                        print(f"      Pieza {idx} descartada. Baneando peer por 60s.")
+                        
+                        # CASTIGO: Banear IP
+                        self.banned_peers[peer_id] = time.time() + 60
+                        self.close_peer_socket(peer_id)
+                        return "corrupt"
+
+                # Si todo está bien (o no hay hash para comparar), escribimos
+                fm.write_chunk(idx, chunk_data)
+                return "success"
+
+            elif head.get('status') == 'missing':
+                return "missing" # El peer no la tenía, no es su culpa
+
+        except Exception as e:
+            # Si el socket falla (ej. timeout), lo cerramos y borramos del pool
+            self.close_peer_socket(peer_id)
             return "network_error"
-        finally:
-            socket_connected.close()
             
         return "network_error"
+        
+        
         
         
 
@@ -414,6 +482,36 @@ class PeerNode:
             traceback.print_exc()
             print(f"[CRASH] Error fatal: {e}")
 
+
+    # En peer_node.py (dentro de la clase PeerNode)
+    
+    def close_peer_socket(self, peer_id):
+        """Cierra la conexión persistente con un peer si hubo error."""
+        if peer_id in self.socket_pool:
+            try: 
+                self.socket_pool[peer_id].close()
+            except: pass
+            del self.socket_pool[peer_id]
+
+
+    def get_expected_hash(self, file_hash, idx):
+        """Lee el hash correcto desde el archivo .json original."""
+        mgr = self.managers.get(file_hash)
+        if not mgr: return None
+        
+        # Ruta al archivo .json
+        json_path = os.path.join(self.folder, f"{mgr['filename']}.json")
+        try:
+            # Optimización: En producción esto debería cargarse en memoria al inicio
+            # para no leer disco en cada pieza, pero para pruebas está bien así.
+            with open(json_path, 'r') as f:
+                data = json.load(f)
+                return data['piece_hashes'][idx]
+        except: 
+            return None
+
+
+
     def monitor(self):
         try:
             while True:
@@ -459,6 +557,9 @@ class PeerNode:
             elif op == '2': self.search_tracker()
             elif op == '3': self.monitor()
             elif op == '4': self.running = False; sys.exit()
+            
+            
+            
 
 if __name__ == "__main__":
     if len(sys.argv) < 2: 
