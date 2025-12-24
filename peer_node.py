@@ -486,31 +486,31 @@ class PeerNode:
             
             
     def verify_integrity(self, filepath, expected_hash):
-    """
-    Calcula el hash SHA-256 del archivo descargado y lo compara con el original.
-    Retorna True si son idénticos, False si el archivo está corrupto.
-    """
-    print(f"🕵️ Verificando integridad de: {filepath}...")
-    
-    sha256_hash = hashlib.sha256()
-    
-    try:
-        with open(filepath, "rb") as f:
-            # Leemos por bloques para no saturar la RAM
-            for byte_block in iter(lambda: f.read(4096), b""):
-                sha256_hash.update(byte_block)
+        """
+        Calcula el hash SHA-256 del archivo descargado y lo compara con el original.
+        Retorna True si son idénticos, False si el archivo está corrupto.
+        """
+        print(f"🕵️ Verificando integridad de: {filepath}...")
         
-        calculated_hash = sha256_hash.hexdigest()
+        sha256_hash = hashlib.sha256()
         
-        if calculated_hash == expected_hash:
-            print("✅ INTEGRIDAD APROBADA. El archivo es auténtico.")
-            return True
-        else:
-            print("🚨 ALERTA DE SEGURIDAD: HASH MISMATCH")
-            print(f"   Esperado: {expected_hash}")
-            print(f"   Calculado: {calculated_hash}")
-            return False
+        try:
+            with open(filepath, "rb") as f:
+                # Leemos por bloques para no saturar la RAM
+                for byte_block in iter(lambda: f.read(4096), b""):
+                    sha256_hash.update(byte_block)
             
+            calculated_hash = sha256_hash.hexdigest()
+            
+            if calculated_hash == expected_hash:
+                print("✅ INTEGRIDAD APROBADA. El archivo es auténtico.")
+                return True
+            else:
+                print("🚨 ALERTA DE SEGURIDAD: HASH MISMATCH")
+                print(f"   Esperado: {expected_hash}")
+                print(f"   Calculado: {calculated_hash}")
+                return False
+                
     except Exception as e:
         print(f"❌ Error al verificar archivo: {e}")
         return False
