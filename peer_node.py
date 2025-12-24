@@ -511,9 +511,9 @@ class PeerNode:
                 print(f"   Calculado: {calculated_hash}")
                 return False
                 
-    except Exception as e:
-        print(f"❌ Error al verificar archivo: {e}")
-        return False
+        except Exception as e:
+            print(f"❌ Error al verificar archivo: {e}")
+            return False
 
 
 
