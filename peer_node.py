@@ -430,15 +430,55 @@ class PeerNode:
                 time.sleep(0.5)
         except KeyboardInterrupt: pass
 
+    def sabotage_file(self):
+        print("\n--- MODO SABOTAJE (CORRUPCIÓN) ---")
+        target = input(">> Ruta del archivo a corromper: ").strip()
+        
+        if not os.path.exists(target):
+            print("❌ El archivo no existe.")
+            return
+
+        try:
+            file_size = os.path.getsize(target)
+            header_safe = 50000  # Protegemos los primeros 50KB (cabecera)
+            damage_size = 2048   # Dañamos 2KB
+            
+            if file_size < (header_safe + damage_size):
+                print("⚠️ Archivo muy pequeño para corromper de forma segura.")
+                return
+
+            # Calcular punto aleatorio
+            max_offset = file_size - damage_size
+            random_offset = random.randint(header_safe, max_offset)
+
+            # Inyectar basura
+            with open(target, "r+b") as f:
+                f.seek(random_offset)
+                f.write(os.urandom(damage_size))
+            
+            print(f"💀 ÉXITO: Se inyectó ruido en el byte {random_offset} del archivo.")
+            print("   (El hash del archivo ha cambiado, pero la cabecera sigue intacta)")
+            
+        except Exception as e:
+            print(f"❌ Error: {e}")
+
+
+
     def main_menu(self):
         while self.running:
             print(f"\n=== NODE {self.my_ip}:{self.my_port} ===")
-            print("1. Publicar | 2. Descargar | 3. Monitor | 4. Salir")
+            # Agregamos la opción 5 visualmente
+            print("1. Publicar | 2. Descargar | 3. Monitor | 4. Salir | 5. 💀 Sabotaje")
+            
             op = input(">> ")
+            
             if op == '1': self.convert_local_file()
             elif op == '2': self.search_tracker()
             elif op == '3': self.monitor()
             elif op == '4': self.running = False; sys.exit()
+            # Agregamos la llamada lógica
+            elif op == '5': self.sabotage_file()
+            else: print("Opción no válida")
 
 
 
