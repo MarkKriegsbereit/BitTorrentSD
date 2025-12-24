@@ -631,16 +631,65 @@ class PeerNode:
                 f_hash = target['hash']
                 jpath = os.path.join(self.folder, f"{target['filename']}.json")
                 
-                # 1. Recuperación local
+
+                # 1. Recuperación local (CON AUTO-ESCANEO DE CORRUPCIÓN)
                 if os.path.exists(jpath):
                     try:
                         with open(jpath, 'r') as f: meta = json.load(f)
+                        
                         if 'filehash' in meta:
-                            self.add_manager(meta['filename'], meta['filehash'], meta['filesize'], KNOWN_TRACKERS)
-                            self.start_download_thread(meta['filehash'])
-                            print("[OK] Reanudando descarga...")
-                            return
-                    except: pass
+                            print(f"[*] Encontrada descarga previa de: {meta['filename']}")
+                            print("🕵️ Verificando integridad de datos locales antes de reanudar...")
+                            
+                            # Validamos si el archivo en disco coincide con los hashes del JSON
+                            local_file = os.path.join(self.folder, meta['filename'])
+                            is_valid = True
+                            
+                            if os.path.exists(local_file) and 'piece_hashes' in meta:
+                                # Verificación rápida: Recalcular hash de lo que tenemos
+                                try:
+                                    # Leemos el archivo actual y comparamos con los hashes guardados
+                                    # NOTA: Esto asume que el archivo se escribe secuencialmente o que verificamos hasta donde llegue el tamaño
+                                    current_size = os.path.getsize(local_file)
+                                    # BLOCK_SIZE debe estar importado de common.py (por defecto 1MB o lo que uses)
+                                    chunks_on_disk = int((current_size + BLOCK_SIZE - 1) / BLOCK_SIZE)
+                                    
+                                    with open(local_file, 'rb') as f_check:
+                                        for i in range(chunks_on_disk):
+                                            if i >= len(meta['piece_hashes']): break # Evitar error de índice
+                                            
+                                            chunk_data = f_check.read(BLOCK_SIZE)
+                                            if not chunk_data: break
+                                            
+                                            # Calculamos hash de este pedazo
+                                            chunk_hash = hashlib.sha256(chunk_data).hexdigest()
+                                            
+                                            # Comparamos con el "Ground Truth" del JSON
+                                            if chunk_hash != meta['piece_hashes'][i]:
+                                                print(f"🚨 CORRUPCIÓN DETECTADA en el chunk #{i}")
+                                                is_valid = False
+                                                break
+                                except Exception as e:
+                                    print(f"⚠️ Error leyendo archivo local: {e}")
+                                    is_valid = False
+
+                            if is_valid:
+                                # Si todo está bien, reanudamos
+                                self.add_manager(meta['filename'], meta['filehash'], meta['filesize'], KNOWN_TRACKERS)
+                                self.start_download_thread(meta['filehash'])
+                                print("[OK] Integridad verificada. Reanudando descarga...")
+                                return
+                            else:
+                                # Si está corrupto, BORRAMOS TODO y dejamos que pase a la descarga de red (Paso 2)
+                                print("🔥 El archivo local está corrupto (posible sabotaje).")
+                                print("🗑️ Borrando datos dañados y reiniciando desde cero...")
+                                
+                                if os.path.exists(local_file): os.remove(local_file)
+                                if os.path.exists(local_file + ".progress"): os.remove(local_file + ".progress")
+                                # No borramos el json para poder volver a descargarlo usando sus datos en el Paso 2
+                    except Exception as e: 
+                        print(f"[!] Error al intentar reanudar: {e}")
+                        pass
 
                 # 2. Descarga de metadatos de la red
                 peers = self.contact_tracker(CMD_ANNOUNCE, f_hash, KNOWN_TRACKERS)
