@@ -18,7 +18,8 @@ KNOWN_TRACKERS = []
 class PeerNode:
     def __init__(self, port, tracker_ip_hint):
         self.my_port = port
-        self.my_ip = get_local_ip() 
+        #self.my_ip = get_local_ip() 
+        self.my_ip = "3.151.6.85"
         self.my_id = f"{self.my_ip}:{port}"
         
         self.folder = f"peer_{port}"
