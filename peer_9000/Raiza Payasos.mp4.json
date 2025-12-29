@@ -2,16 +2,6 @@
     "filename": "Raiza Payasos.mp4",
     "filesize": 335296880,
     "filehash": "3feb5be5873a8aaf69df79eb906a1bda721a69b2892f826e5ddbd656b300b225",
-    "trackers": [
-        [
-            "192.168.1.114",
-            5000
-        ],
-        [
-            "192.168.1.114",
-            5001
-        ]
-    ],
     "piece_hashes": [
         "761135bfa0897d10ac0d13d395c30349b2413b2e4d634d521e468e5efaad3d7a",
         "8ed1c55e55d9ceba127fa5f7d4fd373cadba037fc86661d426674cbad761fe2a",
@@ -333,5 +323,15 @@
         "d2fc9cb29917a78fb22aca4793f2239f2902f9e9d057d7f4eef01af50a9cd31d",
         "c3490988e2d35fc9a3ac62438f9e9f5be39987ded6f26e0729c4275fd0b1bec9",
         "1280200e2f240a878630ea51fc1952e5298d3192e72e973c8390f6dd0952f316"
+    ],
+    "trackers": [
+        [
+            "192.168.1.114",
+            5000
+        ],
+        [
+            "192.168.1.114",
+            5001
+        ]
     ]
 }

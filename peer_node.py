@@ -69,25 +69,51 @@ class PeerNode:
         fm = mgr['fm']
         self.download_stats = {} 
         
-        print(f"[*] Smart Swarm V3 (Secure) iniciado para: {mgr['filename']}")
+        print(f"[*] Smart Swarm V4 (Turbo) iniciado para: {mgr['filename']}")
+        
+        # --- CACHÉ DE PEERS (Optimización CRÍTICA para Windows) ---
+        peers = []
+        last_tracker_update = 0
+        UPDATE_INTERVAL = 10 # Segundos entre consultas al tracker
         
         while fm.get_missing_chunks() and mgr['downloading'] and self.running:
-            # 1. Buscar peers
-            peers = self.contact_tracker(CMD_ANNOUNCE, file_hash, mgr['trackers'])
+            
+            # 1. Actualizar lista de peers (Solo si pasó el tiempo o estamos solos)
+            if (time.time() - last_tracker_update > UPDATE_INTERVAL) or not peers:
+                try:
+                    new_peers = self.contact_tracker(CMD_ANNOUNCE, file_hash, mgr['trackers'])
+                    if new_peers:
+                        peers = new_peers
+                        last_tracker_update = time.time()
+                except Exception as e:
+                    # Si falla el tracker, seguimos con los peers que ya conocemos
+                    pass
             
             # 2. Filtrar candidatos (excluyéndome a mí)
             candidates = [p for p in peers if p['id'] != self.my_id]
             
             if not candidates:
+                print("[!] Buscando peers...")
                 time.sleep(1)
+                last_tracker_update = 0 # Forzar actualización inmediata
                 continue
 
-            # 3. Ordenar por rendimiento (Latencia más baja primero)
+            # 3. Ordenar por rendimiento (Latencia)
             candidates.sort(key=lambda p: self.peer_performance.get(p['id'], 0.5))
+            
+            # --- MEJORA DE COLABORACIÓN (Shuffle) ---
+            # Si hay varios peers buenos, no uses siempre al #1.
+            # Tomamos los 3 mejores y elegimos uno al azar. Esto activa la colaboración.
+            if len(candidates) > 1:
+                top_n = min(len(candidates), 3)
+                best_candidates = candidates[:top_n]
+                random.shuffle(best_candidates) # <--- Aquí está la magia de colaborar
+                candidates = best_candidates + candidates[top_n:]
             
             # 4. Seleccionar qué pieza pedir
             missing = fm.get_missing_chunks()
             if not missing: break
+            
             random.shuffle(missing)
             chunk_to_try = missing[0]
             
@@ -97,7 +123,7 @@ class PeerNode:
             for p in candidates:
                 start_time = time.time()
                 
-                # Intentar descargar (Devuelve: success, missing, corrupt, network_error, banned)
+                # Intentar descargar
                 result = self.request_chunk(p['id'], chunk_to_try, file_hash, fm)
                 
                 elapsed = time.time() - start_time
@@ -106,8 +132,8 @@ class PeerNode:
                     self.update_peer_score(p['id'], elapsed, success=True)
                     self.download_stats[p['id']] = self.download_stats.get(p['id'], 0) + 1
                     
-                    # Chismoso: Avisar al tracker ocasionalmente para actualizar mi %
-                    if random.random() < 0.3: 
+                    # Chismoso: Avisar al tracker (Solo el 10% de las veces para no saturar)
+                    if random.random() < 0.1: 
                         threading.Thread(target=self.contact_tracker, 
                                          args=(CMD_ANNOUNCE, file_hash, mgr['trackers']), 
                                          daemon=True).start()
@@ -115,10 +141,9 @@ class PeerNode:
                     break 
 
                 elif result == "missing":
-                    pass # No penalizar, simplemente no la tenía
+                    pass 
 
                 elif result == "corrupt":
-                    # Seguridad: Ya fue baneado en request_chunk, pero penalizamos el score
                     self.update_peer_score(p['id'], elapsed, success=False)
 
                 elif result == "network_error":
@@ -136,33 +161,23 @@ class PeerNode:
             print("🕵️ Iniciando validación final post-ensamblaje...")
             full_path = os.path.join(self.folder, mgr['filename'])
             
-            # Usamos 'file_hash' porque es el hash global original del torrent
             if self.verify_integrity(full_path, file_hash):
                 print(f"✅ ARCHIVO GUARDADO Y VERIFICADO: {mgr['filename']}")
             else:
                 print("🚨 ERROR CRÍTICO: La firma digital del archivo no coincide.")
                 print("🗑️ El archivo está corrupto. Eliminando del disco...")
                 
-                # 1. Borrar el video corrupto
-                if os.path.exists(full_path):
-                    os.remove(full_path)
+                if os.path.exists(full_path): os.remove(full_path)
+                if os.path.exists(full_path + ".progress"): os.remove(full_path + ".progress")
                 
-                # 2. Borrar archivo de progreso
-                if os.path.exists(full_path + ".progress"):
-                    os.remove(full_path + ".progress")
-                
-                # 3. Borrar el JSON (Para que no crea que somos Seeder al reiniciar)
+                # Borramos el JSON también para forzar re-check de metadatos
                 json_path = os.path.join(self.folder, f"{mgr['filename']}.json")
-                if os.path.exists(json_path):
-                    os.remove(json_path)
+                if os.path.exists(json_path): os.remove(json_path)
 
-                # 4. Eliminar de la memoria RAM (Para que el Monitor se actualice ya)
                 with self.managers_lock:
-                    if file_hash in self.managers:
-                        del self.managers[file_hash]
+                    if file_hash in self.managers: del self.managers[file_hash]
 
                 print("⚠️ Archivo y metadatos eliminados por seguridad.")
-            # ---------------------------------
 
     def update_peer_score(self, peer_id, time_taken, success):
         """ Sistema de Puntuación Dinámica """
@@ -486,7 +501,7 @@ class PeerNode:
                     chunks = self.download_stats.get(pid, 0)
                     print(f"│ {pid:<20} | {lat:.4f}s  | {chunks:<8} │")
                 print(f"└──────────────────────┴───────────┴──────────┘")
-                time.sleep(0.5)
+                time.sleep(2.5)
         except KeyboardInterrupt: pass
 
     def sabotage_file(self):
