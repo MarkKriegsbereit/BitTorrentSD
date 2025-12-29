@@ -658,73 +658,90 @@ class PeerNode:
                 f_hash = target['hash']
                 jpath = os.path.join(self.folder, f"{target['filename']}.json")
                 
-
-                # 1. Recuperación local (CON AUTO-ESCANEO DE CORRUPCIÓN)
+                # =======================================================
+                #   LÓGICA MAESTRA DE RECUPERACIÓN (VERIFICACIÓN + SMART CHECK)
+                # =======================================================
                 if os.path.exists(jpath):
                     try:
                         with open(jpath, 'r') as f: meta = json.load(f)
                         
                         if 'filehash' in meta:
-                            print(f"[*] Encontrada descarga previa de: {meta['filename']}")
-                            print("🕵️ Verificando integridad de datos locales antes de reanudar...")
-                            
-                            # Validamos si el archivo en disco coincide con los hashes del JSON
+                            print(f"[*] Configuración encontrada: {meta['filename']}")
                             local_file = os.path.join(self.folder, meta['filename'])
-                            is_valid = True
+                            progress_file = local_file + ".progress"
                             
+                            # CASO 1: ¿Existe el archivo de video FÍSICAMENTE?
                             if os.path.exists(local_file) and 'piece_hashes' in meta:
-                                # Verificación rápida: Recalcular hash de lo que tenemos
-                                try:
-                                    # Leemos el archivo actual y comparamos con los hashes guardados
-                                    # NOTA: Esto asume que el archivo se escribe secuencialmente o que verificamos hasta donde llegue el tamaño
-                                    current_size = os.path.getsize(local_file)
-                                    # BLOCK_SIZE debe estar importado de common.py (por defecto 1MB o lo que uses)
-                                    chunks_on_disk = int((current_size + BLOCK_SIZE - 1) / BLOCK_SIZE)
-                                    
-                                    with open(local_file, 'rb') as f_check:
-                                        for i in range(chunks_on_disk):
-                                            if i >= len(meta['piece_hashes']): break # Evitar error de índice
+                                print(f"🕵️ El archivo existe. Escaneando integridad bloque a bloque...")
+                                
+                                valid_chunks = []
+                                total_chunks = len(meta['piece_hashes'])
+                                corrupted_count = 0
+                                
+                                with open(local_file, 'rb') as f_check:
+                                    for i, expected_hash in enumerate(meta['piece_hashes']):
+                                        # Leemos el bloque exacto
+                                        f_check.seek(i * BLOCK_SIZE)
+                                        chunk_data = f_check.read(BLOCK_SIZE)
+                                        
+                                        # Si el archivo está incompleto (más corto de lo esperado), paramos
+                                        if not chunk_data: 
+                                            break
                                             
-                                            chunk_data = f_check.read(BLOCK_SIZE)
-                                            if not chunk_data: break
-                                            
-                                            # Calculamos hash de este pedazo
-                                            chunk_hash = hashlib.sha256(chunk_data).hexdigest()
-                                            
-                                            # Comparamos con el "Ground Truth" del JSON
-                                            if chunk_hash != meta['piece_hashes'][i]:
-                                                print(f"🚨 CORRUPCIÓN DETECTADA en el chunk #{i}")
-                                                is_valid = False
-                                                break
-                                except Exception as e:
-                                    print(f"⚠️ Error leyendo archivo local: {e}")
-                                    is_valid = False
+                                        # Calculamos hash
+                                        calc_hash = hashlib.sha256(chunk_data).hexdigest()
+                                        
+                                        if calc_hash == expected_hash:
+                                            valid_chunks.append(i) # ¡Esta pieza sirve!
+                                        else:
+                                            corrupted_count += 1
+                                            # Al NO agregarla a valid_chunks, el sistema la bajará de nuevo
+                                
+                                # Reporte de estado
+                                if corrupted_count > 0:
+                                    print(f"⚠️ Se encontraron {corrupted_count} piezas corruptas/modificadas.")
+                                    print(f"✅ Se rescataron {len(valid_chunks)} piezas válidas.")
+                                elif len(valid_chunks) < total_chunks:
+                                    print(f"ℹ️ Archivo incompleto. Reanudando desde {int(len(valid_chunks)/total_chunks*100)}%...")
+                                else:
+                                    print(f"✅ Archivo verificado al 100%. Listo para Seeding.")
 
-                            if is_valid:
-                                # Si todo está bien, reanudamos
+                                # --- ACTUALIZACIÓN DE PROGRESO ---
+                                # Sobrescribimos el .progress con la realidad del disco
+                                with open(progress_file, 'w') as f_prog:
+                                    json.dump({"downloaded": valid_chunks}, f_prog)
+                                
+                                # Iniciamos el gestor (leerá el .progress que acabamos de crear)
                                 self.add_manager(meta['filename'], meta['filehash'], meta['filesize'], KNOWN_TRACKERS)
                                 self.start_download_thread(meta['filehash'])
-                                print("[OK] Integridad verificada. Reanudando descarga...")
                                 return
-                            else:
-                                # Si está corrupto, BORRAMOS TODO y dejamos que pase a la descarga de red (Paso 2)
-                                print("🔥 El archivo local está corrupto (posible sabotaje).")
-                                print("🗑️ Borrando datos dañados y reiniciando desde cero...")
-                                
-                                if os.path.exists(local_file): os.remove(local_file)
-                                if os.path.exists(local_file + ".progress"): os.remove(local_file + ".progress")
-                                # No borramos el json para poder volver a descargarlo usando sus datos en el Paso 2
-                    except Exception as e: 
-                        print(f"[!] Error al intentar reanudar: {e}")
-                        pass
 
-                # 2. Descarga de metadatos de la red
+                            # CASO 2: Existe el JSON pero NO el video (Tu problema del "Falso 100%")
+                            else:
+                                print("⚠️ JSON encontrado pero el archivo de video NO existe.")
+                                print("🔄 Reiniciando descarga desde 0%...")
+                                
+                                # Borramos el progreso antiguo porque miente (decía que teníamos piezas que ya no están)
+                                if os.path.exists(progress_file): os.remove(progress_file)
+
+                                # Iniciamos descarga limpia (FileManager creará un bitfield vacío)
+                                self.add_manager(meta['filename'], meta['filehash'], meta['filesize'], KNOWN_TRACKERS)
+                                self.start_download_thread(meta['filehash'])
+                                return
+
+                    except Exception as e: 
+                        print(f"[!] Error leyendo configuración local (se descargará de nuevo): {e}")
+                        # Si el JSON está corrupto, lo borramos para bajarlo bien
+                        if os.path.exists(jpath): os.remove(jpath)
+
+                # ==========================================
+                #  PASO 2: Descarga normal de red (Si no había JSON válido)
+                # ==========================================
                 peers = self.contact_tracker(CMD_ANNOUNCE, f_hash, KNOWN_TRACKERS)
                 if not peers: print("[!] Sin peers."); return
                 
                 meta = self.fetch_metadata_from_swarm(f_hash, peers)
                 if meta and 'filename' in meta:
-                    # Guardamos TODO, incluyendo 'piece_hashes' si vienen
                     save_meta = {
                         "filename": meta['filename'], 
                         "filesize": meta['filesize'], 
@@ -736,12 +753,14 @@ class PeerNode:
                     
                     self.add_manager(meta['filename'], f_hash, meta['filesize'], KNOWN_TRACKERS)
                     self.start_download_thread(f_hash)
-                    print("[OK] Iniciando Smart Download...")
+                    print("[OK] Metadatos obtenidos. Iniciando descarga...")
                 else: 
                     print("[ERROR] No se pudieron obtener metadatos.")
+
         except Exception as e:
             traceback.print_exc()
             print(f"[CRASH] Error fatal: {e}")
+
 
 if __name__ == "__main__":
     if len(sys.argv) < 2: 
