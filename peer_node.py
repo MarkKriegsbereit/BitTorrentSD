@@ -182,21 +182,23 @@ class PeerNode:
     # ==========================================
     #               CLIENTE DE RED
     # ==========================================
+
     def request_chunk(self, peer_id, idx, file_hash, fm):
         # 1. SEGURIDAD: Verificar lista negra
         if peer_id in self.banned_peers:
             if time.time() < self.banned_peers[peer_id]: return "banned"
-            else: del self.banned_peers[peer_id] # Expiró el baneo
+            else: del self.banned_peers[peer_id] 
 
         target_ip, target_port = peer_id.split(':')
-        ips_to_try = [target_ip, '127.0.0.1']
+        
+        # En Bridged mode, usar 127.0.0.1 como fallback puede confundir si target_ip es la propia
+        ips_to_try = [target_ip] 
         
         s = None
-        # Intentar conectar
         for ip_cand in ips_to_try:
             try:
                 s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                s.settimeout(4.0) 
+                s.settimeout(5.0) 
                 s.connect((ip_cand, int(target_port)))
                 break
             except: 
@@ -206,11 +208,11 @@ class PeerNode:
         if not s: return "network_error"
 
         try:
-            # Enviar petición
             msg = {"command": CMD_REQUEST_CHUNK, "file_hash": file_hash, "chunk_index": idx}
-            s.send(json.dumps(msg).encode())
             
-            # Leer header
+            # --- CORRECCIÓN CRÍTICA: Añadir \n al enviar ---
+            s.send(json.dumps(msg).encode() + b'\n') 
+            
             f = s.makefile('rb')
             head_line = f.readline()
             if not head_line: return "network_error"
@@ -218,29 +220,29 @@ class PeerNode:
             head = json.loads(head_line)
             
             if head.get('status') == 'ok':
-                # Leer datos binarios
                 chunk_data = f.read(head['size'])
                 if len(chunk_data) != head['size']: return "network_error"
 
-                # --- ZONA DE SEGURIDAD (Hash Check) ---
+                # Hash Check
                 expected = self.get_expected_hash(file_hash, idx)
                 if expected:
                     calc = hashlib.sha256(chunk_data).hexdigest()
                     if calc != expected:
-                        print(f"\n[ALERTA] Hash incorrecto de {peer_id}. BANEADO 60s.")
                         self.banned_peers[peer_id] = time.time() + 60
                         return "corrupt"
-                # --------------------------------------
 
-                # Escribir a disco
                 fm.write_chunk(idx, chunk_data)
                 return "success"
             
             elif head.get('status') == 'missing': return "missing"
         except: return "network_error"
         finally: 
-            if s: s.close() # Cerrar siempre (Estabilidad)
+            if s: s.close()
         return "network_error"
+
+
+
+
 
     def get_expected_hash(self, file_hash, idx):
         mgr = self.managers.get(file_hash)

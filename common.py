@@ -2,8 +2,8 @@
 import hashlib
 import socket
 
-BLOCK_SIZE = 1024 * 1024  # 512 KB
-BUFFER_SIZE = 65536       # Aumentamos un poco el buffer
+BLOCK_SIZE = 1024 * 1024  # 1 MB
+BUFFER_SIZE = 65536       # 64 KB
 
 # Puertos
 TRACKER_PORT = 5000
@@ -24,20 +24,26 @@ def calculate_file_hash(filepath):
             sha256.update(data)
     return sha256.hexdigest()
     
-    
 def get_local_ip():
     """
-    Detecta la IP real de la máquina en la red (ej. 192.168.1.50).
-    No conecta a internet, solo consulta la ruta de salida.
+    Intenta obtener la IP de la interfaz LAN real.
     """
-    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     try:
-        # Intentamos conectar a una IP pública (Google DNS)
-        # No envía paquetes reales, solo calcula qué interfaz usaría.
+        # Metodo 1: Conectar a un DNS público (requiere internet)
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         s.connect(('8.8.8.8', 80))
         IP = s.getsockname()[0]
-    except Exception:
-        IP = '127.0.0.1'
-    finally:
         s.close()
+    except:
+        try:
+            # Metodo 2: Obtener el nombre del host (funciona en muchas LANs sin internet)
+            IP = socket.gethostbyname(socket.gethostname())
+        except:
+            IP = '127.0.0.1'
+    
+    # Si detecta localhost, avisamos (esto rompe el Bridged mode)
+    if IP.startswith("127."):
+        print("⚠️ ADVERTENCIA: Se detectó IP local (127.x.x.x).")
+        print("   Si estás en modo Bridged, esto impedirá conexiones externas.")
+        
     return IP
