@@ -18,8 +18,10 @@ KNOWN_TRACKERS = []
 class PeerNode:
     def __init__(self, port, tracker_ip_hint):
         self.my_port = port
-        #self.my_ip = get_local_ip() 
-        self.my_ip = "3.151.6.85"
+        if port == 15000: 
+            self.my_ip = "192.168.116.1" # <--- PON AQUÍ TU IP EXACTA DEL ADAPTADOR VMnet8
+        else:
+            self.my_ip = get_local_ip()
         self.my_id = f"{self.my_ip}:{port}"
         
         self.folder = f"peer_{port}"
@@ -729,3 +731,4 @@ if __name__ == "__main__":
     if not tracker_hint.strip(): tracker_hint = ip_sugerida
     
     PeerNode(int(sys.argv[1]), tracker_hint).main_menu()
+
