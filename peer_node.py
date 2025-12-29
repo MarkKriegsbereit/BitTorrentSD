@@ -211,7 +211,7 @@ class PeerNode:
             msg = {"command": CMD_REQUEST_CHUNK, "file_hash": file_hash, "chunk_index": idx}
             
             # --- CORRECCIÓN CRÍTICA: Añadir \n al enviar ---
-            s.send(json.dumps(msg).encode() + b'\n') 
+            s.sendall(json.dumps(msg).encode() + b'\n')
             
             f = s.makefile('rb')
             head_line = f.readline()
@@ -269,10 +269,11 @@ class PeerNode:
                 threading.Thread(target=self.handle_upload, args=(conn,)).start()
             except: pass
 
+
+
     def handle_upload(self, conn):
         try:
             conn.settimeout(10)
-            # Leer petición
             raw = conn.recv(4096).decode()
             if not raw: return
             
@@ -282,25 +283,49 @@ class PeerNode:
             if cmd == CMD_REQUEST_CHUNK:
                 mgr = self.managers.get(req.get('file_hash'))
                 if mgr:
-                    # Simulación de latencia mínima SOLO si es seeder 100%
-                    if mgr['fm'].get_progress_percentage() == 100: time.sleep(0.01)
-
+                    # Leemos el bloque del disco
                     data = mgr['fm'].read_chunk(req.get('chunk_index'))
+                    
                     if data:
-                        # Protocolo: Header JSON + \n + Datos Binarios
                         header = json.dumps({"status": "ok", "size": len(data)})
-                        conn.send(header.encode() + b'\n' + data)
+                        
+                        # --- CORRECCIÓN CRÍTICA AQUÍ ---
+                        # Usamos sendall() en lugar de send()
+                        # send() trunca los datos si son grandes (como un bloque de 1MB)
+                        payload = header.encode() + b'\n' + data
+                        conn.sendall(payload)  # <--- CAMBIO: sendall
+                        
                     else:
-                        conn.send(json.dumps({"status": "missing"}).encode() + b'\n')
+                        conn.sendall(json.dumps({"status": "missing"}).encode() + b'\n')
             
             elif cmd == CMD_GET_METADATA:
                 mgr = self.managers.get(req.get('file_hash'))
                 if mgr:
-                    meta = {"status": "ok", "filename": mgr['filename'], "filesize": mgr['fm'].total_size, "trackers": mgr['trackers']}
-                    conn.send(json.dumps(meta).encode() + b'\n')
+                    try:
+                        json_path = os.path.join(self.folder, f"{mgr['filename']}.json")
+                        with open(json_path, 'r') as f:
+                            saved_data = json.load(f)
+                            hashes = saved_data.get('piece_hashes', [])
+                    except: hashes = []
 
-        except: pass
-        finally: conn.close()
+                    meta = {
+                        "status": "ok", 
+                        "filename": mgr['filename'], 
+                        "filesize": mgr['fm'].total_size, 
+                        "trackers": mgr['trackers'],
+                        "piece_hashes": hashes 
+                    }
+                    # Aquí también es bueno usar sendall por seguridad
+                    conn.sendall(json.dumps(meta).encode() + b'\n') # <--- CAMBIO: sendall
+
+        except Exception as e:
+            # print(f"Error upload: {e}") 
+            pass
+        finally: 
+            conn.close()
+        
+        
+        
 
     # ==========================================
     #        GESTIÓN Y AUXILIARES
