@@ -203,7 +203,7 @@ class PeerNode:
         for ip_cand in ips_to_try:
             try:
                 s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                s.settimeout(5.0) # Timeout de 5s para evitar bloqueos largos
+                s.settimeout(5.0) # Timeout estricto para evitar bloqueos infinitos
                 s.connect((ip_cand, int(target_port)))
                 break # Conexión exitosa
             except: 
@@ -214,12 +214,11 @@ class PeerNode:
 
         try:
             # 3. Enviar petición CON SALTO DE LÍNEA (\n)
-            # CRÍTICO: El servidor usa readline(), sin el \n se cuelga esperando.
+            # CRÍTICO: Sin esto, un servidor actualizado se quedará esperando eternamente
             msg = {"command": CMD_REQUEST_CHUNK, "file_hash": file_hash, "chunk_index": idx}
             s.send(json.dumps(msg).encode() + b'\n') 
             
-            # 4. Leer header
-            # Usamos makefile para leer la línea del JSON cómodamente
+            # 4. Leer header usando makefile (permite usar readline)
             f = s.makefile('rb') 
             head_line = f.readline()
             
@@ -229,7 +228,7 @@ class PeerNode:
             
             if head.get('status') == 'ok':
                 # 5. Leer datos binarios de forma segura
-                # A veces f.read(size) no devuelve todo de golpe, mejor asegurar.
+                # Aseguramos leer exactamente la cantidad de bytes prometida
                 expected_size = head['size']
                 chunk_data = f.read(expected_size)
                 
@@ -254,14 +253,16 @@ class PeerNode:
                 return "missing"
 
         except socket.timeout:
-            return "network_error" # Diferenciamos timeout de otros errores
+            return "network_error"
         except Exception as e:
             # print(f"Error debug: {e}") 
             return "network_error"
         finally: 
-            if s: s.close() # Cerrar siempre (Estabilidad)
+            if s: s.close() # Cerrar siempre el socket
         
         return "network_error"
+        
+        
         
         
         
@@ -298,27 +299,29 @@ class PeerNode:
         try:
             conn.settimeout(10)
             # Leer petición
+            # Usamos un buffer pequeño para leer el comando inicial
             raw = conn.recv(4096).decode()
             if not raw: return
             
+            # Intentamos parsear incluso si vienen saltos de línea extra
             req = json.loads(raw.strip())
             cmd = req.get('command')
             
             if cmd == CMD_REQUEST_CHUNK:
                 mgr = self.managers.get(req.get('file_hash'))
                 if mgr:
-                    # Simulación de latencia mínima SOLO si es seeder 100%
-                    if mgr['fm'].get_progress_percentage() == 100: time.sleep(0.01)
+                    # Simulación de latencia mínima (opcional)
+                    if mgr['fm'].get_progress_percentage() == 100: time.sleep(0.001)
 
                     data = mgr['fm'].read_chunk(req.get('chunk_index'))
                     if data:
                         # Protocolo: Header JSON + \n + Datos Binarios
+                        # CRÍTICO: Añadir el b'\n' después del header
                         header = json.dumps({"status": "ok", "size": len(data)})
                         conn.send(header.encode() + b'\n' + data)
                     else:
                         conn.send(json.dumps({"status": "missing"}).encode() + b'\n')
             
-            # --- AQUÍ ESTÁ TU BLOQUE CORREGIDO ---
             elif cmd == CMD_GET_METADATA:
                 mgr = self.managers.get(req.get('file_hash'))
                 if mgr:
@@ -337,17 +340,17 @@ class PeerNode:
                         "filename": mgr['filename'], 
                         "filesize": mgr['fm'].total_size, 
                         "trackers": mgr['trackers'],
-                        "piece_hashes": hashes  # <--- HASHES INCLUIDOS
+                        "piece_hashes": hashes 
                     }
+                    # CRÍTICO: Añadir el b'\n' al final
                     conn.send(json.dumps(meta).encode() + b'\n')
-            # -------------------------------------
 
         except Exception as e:
-            # Opcional: Imprimir error para depuración
-            # print(f"Error en handle_upload: {e}")
-            pass
+            pass 
         finally: 
-            conn.close() # <--- IMPORTANTE: Esto asegura que no se quede colgado
+            conn.close() # Aseguramos cerrar la conexión entrante
+
+
 
     # ==========================================
     #        GESTIÓN Y AUXILIARES
