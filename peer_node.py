@@ -345,11 +345,20 @@ class PeerNode:
     # ==========================================
     #        GESTIÓN Y AUXILIARES
     # ==========================================
-    def add_manager(self, filename, file_hash, size, trackers):
+    def add_manager(self, filename, file_hash, size, trackers, force_leecher=False):
         with self.managers_lock:
-            if file_hash in self.managers: return self.managers[file_hash]
+            # Si ya existe en memoria, lo devolvemos (a menos que queramos recargar, 
+            # pero eso lo manejamos borrándolo antes en search_tracker)
+            if file_hash in self.managers: 
+                return self.managers[file_hash]
+            
             real_path = os.path.join(self.folder, filename)
-            is_seeder = os.path.exists(real_path) and os.path.getsize(real_path) == size
+            
+            # LÓGICA CORREGIDA:
+            # Es Seeder SOLO si el tamaño coincide Y no nos están forzando a ser leecher
+            size_match = os.path.exists(real_path) and os.path.getsize(real_path) == size
+            is_seeder = size_match and not force_leecher
+            
             fm = FileManager(self.folder, filename, size, is_seeder)
             self.managers[file_hash] = {"fm": fm, "filename": filename, "trackers": trackers, "downloading": False}
             return self.managers[file_hash]
@@ -674,7 +683,7 @@ class PeerNode:
                 jpath = os.path.join(self.folder, f"{target['filename']}.json")
                 
                 # =======================================================
-                #   LÓGICA MAESTRA DE RECUPERACIÓN (VERIFICACIÓN + SMART CHECK)
+                #   LÓGICA MAESTRA DE RECUPERACIÓN (CORREGIDA)
                 # =======================================================
                 if os.path.exists(jpath):
                     try:
@@ -685,6 +694,11 @@ class PeerNode:
                             local_file = os.path.join(self.folder, meta['filename'])
                             progress_file = local_file + ".progress"
                             
+                            # LIMPIEZA DE MEMORIA CRÍTICA:
+                            # Borramos cualquier gestor previo para obligar a recargar desde disco
+                            with self.managers_lock:
+                                if f_hash in self.managers: del self.managers[f_hash]
+
                             # CASO 1: ¿Existe el archivo de video FÍSICAMENTE?
                             if os.path.exists(local_file) and 'piece_hashes' in meta:
                                 print(f"🕵️ El archivo existe. Escaneando integridad bloque a bloque...")
@@ -695,62 +709,52 @@ class PeerNode:
                                 
                                 with open(local_file, 'rb') as f_check:
                                     for i, expected_hash in enumerate(meta['piece_hashes']):
-                                        # Leemos el bloque exacto
                                         f_check.seek(i * BLOCK_SIZE)
                                         chunk_data = f_check.read(BLOCK_SIZE)
+                                        if not chunk_data: break
                                         
-                                        # Si el archivo está incompleto (más corto de lo esperado), paramos
-                                        if not chunk_data: 
-                                            break
-                                            
-                                        # Calculamos hash
-                                        calc_hash = hashlib.sha256(chunk_data).hexdigest()
-                                        
-                                        if calc_hash == expected_hash:
-                                            valid_chunks.append(i) # ¡Esta pieza sirve!
+                                        if hashlib.sha256(chunk_data).hexdigest() == expected_hash:
+                                            valid_chunks.append(i)
                                         else:
                                             corrupted_count += 1
-                                            # Al NO agregarla a valid_chunks, el sistema la bajará de nuevo
                                 
-                                # Reporte de estado
+                                # Reporte
                                 if corrupted_count > 0:
                                     print(f"⚠️ Se encontraron {corrupted_count} piezas corruptas/modificadas.")
                                     print(f"✅ Se rescataron {len(valid_chunks)} piezas válidas.")
                                 elif len(valid_chunks) < total_chunks:
-                                    print(f"ℹ️ Archivo incompleto. Reanudando desde {int(len(valid_chunks)/total_chunks*100)}%...")
+                                    print(f"ℹ️ Archivo incompleto. Reanudando descarga...")
                                 else:
                                     print(f"✅ Archivo verificado al 100%. Listo para Seeding.")
 
-                                # --- ACTUALIZACIÓN DE PROGRESO ---
-                                # Sobrescribimos el .progress con la realidad del disco
+                                # Actualizamos el .progress
                                 with open(progress_file, 'w') as f_prog:
                                     json.dump({"downloaded": valid_chunks}, f_prog)
                                 
-                                # Iniciamos el gestor (leerá el .progress que acabamos de crear)
-                                self.add_manager(meta['filename'], meta['filehash'], meta['filesize'], KNOWN_TRACKERS)
+                                # REINICIO CON FORCE_LEECHER
+                                # Si hubo corrupción o faltan piezas, pasamos force_leecher=True
+                                # para que add_manager NO crea que somos seeders solo por el tamaño.
+                                is_imperfect = (corrupted_count > 0) or (len(valid_chunks) < total_chunks)
+                                
+                                self.add_manager(meta['filename'], meta['filehash'], meta['filesize'], KNOWN_TRACKERS, force_leecher=is_imperfect)
                                 self.start_download_thread(meta['filehash'])
                                 return
 
-                            # CASO 2: Existe el JSON pero NO el video (Tu problema del "Falso 100%")
+                            # CASO 2: Existe JSON pero NO video
                             else:
-                                print("⚠️ JSON encontrado pero el archivo de video NO existe.")
-                                print("🔄 Reiniciando descarga desde 0%...")
-                                
-                                # Borramos el progreso antiguo porque miente (decía que teníamos piezas que ya no están)
+                                print("⚠️ JSON encontrado pero sin video. Reiniciando descarga.")
                                 if os.path.exists(progress_file): os.remove(progress_file)
-
-                                # Iniciamos descarga limpia (FileManager creará un bitfield vacío)
+                                
                                 self.add_manager(meta['filename'], meta['filehash'], meta['filesize'], KNOWN_TRACKERS)
                                 self.start_download_thread(meta['filehash'])
                                 return
 
                     except Exception as e: 
-                        print(f"[!] Error leyendo configuración local (se descargará de nuevo): {e}")
-                        # Si el JSON está corrupto, lo borramos para bajarlo bien
+                        print(f"[!] Error leyendo configuración local: {e}")
                         if os.path.exists(jpath): os.remove(jpath)
 
                 # ==========================================
-                #  PASO 2: Descarga normal de red (Si no había JSON válido)
+                #  PASO 2: Descarga de red (Nuevo)
                 # ==========================================
                 peers = self.contact_tracker(CMD_ANNOUNCE, f_hash, KNOWN_TRACKERS)
                 if not peers: print("[!] Sin peers."); return
@@ -775,6 +779,8 @@ class PeerNode:
         except Exception as e:
             traceback.print_exc()
             print(f"[CRASH] Error fatal: {e}")
+
+
 
 
 if __name__ == "__main__":

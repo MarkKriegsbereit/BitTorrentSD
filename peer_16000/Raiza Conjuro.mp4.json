@@ -2,6 +2,16 @@
     "filename": "Raiza Conjuro.mp4",
     "filesize": 323636136,
     "filehash": "a5852f3c61f8ec29dadc43e07b55de4d878d2203317a2022c7be1ea24937cc62",
+    "trackers": [
+        [
+            "192.168.1.114",
+            5000
+        ],
+        [
+            "192.168.1.114",
+            5001
+        ]
+    ],
     "piece_hashes": [
         "a6aef51a21094d479c96010179bd823316e9e7a1e0158e64cae25766196095cc",
         "cb94bf8bd83ae8a9ee74cad057bf92e67f9012f1fb35093ec069a95f73c092f8",
@@ -312,15 +322,5 @@
         "5d2cbf54be53a0bed5d7ca0255e71d08d940cd6d2b0a0e3faac1b3f50da96280",
         "225dfc2e2c996705c8868d4fdd9b5b8c8f8f8173871ac178950f3d49d781b2f6",
         "52b968eba0f710d4e28e2772b115d950127bc6a2e388eb51b0ed96510ce4da03"
-    ],
-    "trackers": [
-        [
-            "192.18.116.1",
-            5000
-        ],
-        [
-            "192.18.116.1",
-            5001
-        ]
     ]
 }
