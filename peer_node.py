@@ -291,6 +291,9 @@ class PeerNode:
                 threading.Thread(target=self.handle_upload, args=(conn,)).start()
             except: pass
 
+    # ==========================================
+    #               SERVIDOR
+    # ==========================================
     def handle_upload(self, conn):
         try:
             conn.settimeout(10)
@@ -315,6 +318,7 @@ class PeerNode:
                     else:
                         conn.send(json.dumps({"status": "missing"}).encode() + b'\n')
             
+            # --- AQUÍ ESTÁ TU BLOQUE CORREGIDO ---
             elif cmd == CMD_GET_METADATA:
                 mgr = self.managers.get(req.get('file_hash'))
                 if mgr:
@@ -333,9 +337,17 @@ class PeerNode:
                         "filename": mgr['filename'], 
                         "filesize": mgr['fm'].total_size, 
                         "trackers": mgr['trackers'],
-                        "piece_hashes": hashes  # <--- ESTO ES LO QUE FALTABA
+                        "piece_hashes": hashes  # <--- HASHES INCLUIDOS
                     }
                     conn.send(json.dumps(meta).encode() + b'\n')
+            # -------------------------------------
+
+        except Exception as e:
+            # Opcional: Imprimir error para depuración
+            # print(f"Error en handle_upload: {e}")
+            pass
+        finally: 
+            conn.close() # <--- IMPORTANTE: Esto asegura que no se quede colgado
 
     # ==========================================
     #        GESTIÓN Y AUXILIARES
