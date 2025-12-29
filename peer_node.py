@@ -18,10 +18,7 @@ KNOWN_TRACKERS = []
 class PeerNode:
     def __init__(self, port, tracker_ip_hint):
         self.my_port = port
-        if port == 15000: 
-            self.my_ip = "192.168.116.1" # <--- PON AQUÍ TU IP EXACTA DEL ADAPTADOR VMnet8
-        else:
-            self.my_ip = get_local_ip()
+        self.my_ip = get_local_ip() 
         self.my_id = f"{self.my_ip}:{port}"
         
         self.folder = f"peer_{port}"
@@ -182,30 +179,26 @@ class PeerNode:
             
         self.peer_performance[peer_id] = new_score
 
-
     # ==========================================
     #               CLIENTE DE RED
     # ==========================================
     def request_chunk(self, peer_id, idx, file_hash, fm):
         # 1. SEGURIDAD: Verificar lista negra
         if peer_id in self.banned_peers:
-            if time.time() < self.banned_peers[peer_id]: 
-                return "banned"
-            else: 
-                del self.banned_peers[peer_id] # Expiró el baneo
+            if time.time() < self.banned_peers[peer_id]: return "banned"
+            else: del self.banned_peers[peer_id] # Expiró el baneo
 
         target_ip, target_port = peer_id.split(':')
         ips_to_try = [target_ip, '127.0.0.1']
         
         s = None
-        
-        # 2. Intentar conectar (Manejo robusto de socket)
+        # Intentar conectar
         for ip_cand in ips_to_try:
             try:
                 s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                s.settimeout(5.0) # Timeout estricto para evitar bloqueos infinitos
+                s.settimeout(4.0) 
                 s.connect((ip_cand, int(target_port)))
-                break # Conexión exitosa
+                break
             except: 
                 if s: s.close()
                 s = None
@@ -213,27 +206,21 @@ class PeerNode:
         if not s: return "network_error"
 
         try:
-            # 3. Enviar petición CON SALTO DE LÍNEA (\n)
-            # CRÍTICO: Sin esto, un servidor actualizado se quedará esperando eternamente
+            # Enviar petición
             msg = {"command": CMD_REQUEST_CHUNK, "file_hash": file_hash, "chunk_index": idx}
-            s.send(json.dumps(msg).encode() + b'\n') 
+            s.send(json.dumps(msg).encode())
             
-            # 4. Leer header usando makefile (permite usar readline)
-            f = s.makefile('rb') 
+            # Leer header
+            f = s.makefile('rb')
             head_line = f.readline()
-            
             if not head_line: return "network_error"
             
             head = json.loads(head_line)
             
             if head.get('status') == 'ok':
-                # 5. Leer datos binarios de forma segura
-                # Aseguramos leer exactamente la cantidad de bytes prometida
-                expected_size = head['size']
-                chunk_data = f.read(expected_size)
-                
-                if len(chunk_data) != expected_size:
-                    return "network_error"
+                # Leer datos binarios
+                chunk_data = f.read(head['size'])
+                if len(chunk_data) != head['size']: return "network_error"
 
                 # --- ZONA DE SEGURIDAD (Hash Check) ---
                 expected = self.get_expected_hash(file_hash, idx)
@@ -249,23 +236,11 @@ class PeerNode:
                 fm.write_chunk(idx, chunk_data)
                 return "success"
             
-            elif head.get('status') == 'missing': 
-                return "missing"
-
-        except socket.timeout:
-            return "network_error"
-        except Exception as e:
-            # print(f"Error debug: {e}") 
-            return "network_error"
+            elif head.get('status') == 'missing': return "missing"
+        except: return "network_error"
         finally: 
-            if s: s.close() # Cerrar siempre el socket
-        
+            if s: s.close() # Cerrar siempre (Estabilidad)
         return "network_error"
-        
-        
-        
-        
-        
 
     def get_expected_hash(self, file_hash, idx):
         mgr = self.managers.get(file_hash)
@@ -292,31 +267,25 @@ class PeerNode:
                 threading.Thread(target=self.handle_upload, args=(conn,)).start()
             except: pass
 
-    # ==========================================
-    #               SERVIDOR
-    # ==========================================
     def handle_upload(self, conn):
         try:
             conn.settimeout(10)
             # Leer petición
-            # Usamos un buffer pequeño para leer el comando inicial
             raw = conn.recv(4096).decode()
             if not raw: return
             
-            # Intentamos parsear incluso si vienen saltos de línea extra
             req = json.loads(raw.strip())
             cmd = req.get('command')
             
             if cmd == CMD_REQUEST_CHUNK:
                 mgr = self.managers.get(req.get('file_hash'))
                 if mgr:
-                    # Simulación de latencia mínima (opcional)
-                    if mgr['fm'].get_progress_percentage() == 100: time.sleep(0.001)
+                    # Simulación de latencia mínima SOLO si es seeder 100%
+                    if mgr['fm'].get_progress_percentage() == 100: time.sleep(0.01)
 
                     data = mgr['fm'].read_chunk(req.get('chunk_index'))
                     if data:
                         # Protocolo: Header JSON + \n + Datos Binarios
-                        # CRÍTICO: Añadir el b'\n' después del header
                         header = json.dumps({"status": "ok", "size": len(data)})
                         conn.send(header.encode() + b'\n' + data)
                     else:
@@ -325,32 +294,11 @@ class PeerNode:
             elif cmd == CMD_GET_METADATA:
                 mgr = self.managers.get(req.get('file_hash'))
                 if mgr:
-                    # 1. Recuperamos los hashes del archivo JSON guardado en disco
-                    try:
-                        json_path = os.path.join(self.folder, f"{mgr['filename']}.json")
-                        with open(json_path, 'r') as f:
-                            saved_data = json.load(f)
-                            hashes = saved_data.get('piece_hashes', [])
-                    except:
-                        hashes = []
-
-                    # 2. Incluimos los hashes en la respuesta
-                    meta = {
-                        "status": "ok", 
-                        "filename": mgr['filename'], 
-                        "filesize": mgr['fm'].total_size, 
-                        "trackers": mgr['trackers'],
-                        "piece_hashes": hashes 
-                    }
-                    # CRÍTICO: Añadir el b'\n' al final
+                    meta = {"status": "ok", "filename": mgr['filename'], "filesize": mgr['fm'].total_size, "trackers": mgr['trackers']}
                     conn.send(json.dumps(meta).encode() + b'\n')
 
-        except Exception as e:
-            pass 
-        finally: 
-            conn.close() # Aseguramos cerrar la conexión entrante
-
-
+        except: pass
+        finally: conn.close()
 
     # ==========================================
     #        GESTIÓN Y AUXILIARES
