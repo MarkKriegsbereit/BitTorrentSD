@@ -2,7 +2,7 @@
 import hashlib
 import socket
 
-BLOCK_SIZE = 1024 * 1024  # 1 MB
+BLOCK_SIZE = 1024 * 1024*5  # 5 MB
 BUFFER_SIZE = 65536       # 64 KB
 
 # Puertos
