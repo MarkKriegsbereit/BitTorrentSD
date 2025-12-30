@@ -397,12 +397,13 @@ class PeerNode:
         for p_data in peers_list:
             if p_data['id'] == self.my_id: continue 
             target_ip, target_port = p_data['id'].split(':')
-            ips_to_try = [target_ip, '127.0.0.1']
+            ips_to_try = [target_ip]
             for ip_cand in ips_to_try:
                 s = None
                 try:
                     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                    s.settimeout(2)
+                    s.settimeout(10)
+                    print(f"Conectando a {ip_cand}:{target_port}...") # Debug visual
                     s.connect((ip_cand, int(target_port)))
                     
                     # Corrección importante: Enviar \n al final
