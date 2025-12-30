@@ -249,8 +249,16 @@ class PeerNode:
             head = json.loads(head_line)
             
             if head.get('status') == 'ok':
-                chunk_data = f.read(head['size'])
-                if len(chunk_data) != head['size']: return "network_error"
+                expected_size = head['size']
+                chunk_data = b""
+                
+                # Leer en bucle hasta completar el tamaño exacto (Crucial para chunks grandes)
+                while len(chunk_data) < expected_size:
+                    packet = f.read(expected_size - len(chunk_data))
+                    if not packet: break
+                    chunk_data += packet
+
+                if len(chunk_data) != expected_size: return "network_error"
 
                 # Hash Check
                 expected = self.get_expected_hash(file_hash, idx)
