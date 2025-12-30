@@ -118,11 +118,11 @@ class PeerNode:
             # --- MEJORA DE COLABORACIÓN (Shuffle) ---
             # Si hay varios peers buenos, no uses siempre al #1.
             # Tomamos los 3 mejores y elegimos uno al azar. Esto activa la colaboración.
-            if len(candidates) > 1:
-                top_n = min(len(candidates), 3)
-                best_candidates = candidates[:top_n]
-                random.shuffle(best_candidates) # <--- Aquí está la magia de colaborar
-                candidates = best_candidates + candidates[top_n:]
+#            if len(candidates) > 1:
+#                top_n = min(len(candidates), 3)
+#                best_candidates = candidates[:top_n]
+#                random.shuffle(best_candidates) # <--- Aquí está la magia de colaborar
+#                candidates = best_candidates + candidates[top_n:]
             
             # 4. Seleccionar qué pieza pedir
             missing = fm.get_missing_chunks()
@@ -712,7 +712,7 @@ class PeerNode:
                 jpath = os.path.join(self.folder, f"{target['filename']}.json")
                 
                 # =======================================================
-                #   LÓGICA MAESTRA DE RECUPERACIÓN (CORREGIDA)
+                #    LÓGICA MAESTRA DE RECUPERACIÓN (CORREGIDA)
                 # =======================================================
                 if os.path.exists(jpath):
                     try:
@@ -730,16 +730,23 @@ class PeerNode:
 
                             # CASO 1: ¿Existe el archivo de video FÍSICAMENTE?
                             if os.path.exists(local_file) and 'piece_hashes' in meta:
+                                
                                 print(f"🕵️ El archivo existe. Escaneando integridad bloque a bloque...")
                                 
+                                # --- CORRECCIÓN 1: Usar el tamaño del JSON, no el global ---
+                                json_piece_size = meta.get('piece_size', BLOCK_SIZE)
+                                # -----------------------------------------------------------
+
                                 valid_chunks = []
                                 total_chunks = len(meta['piece_hashes'])
                                 corrupted_count = 0
                                 
                                 with open(local_file, 'rb') as f_check:
                                     for i, expected_hash in enumerate(meta['piece_hashes']):
-                                        f_check.seek(i * BLOCK_SIZE)
-                                        chunk_data = f_check.read(BLOCK_SIZE)
+                                        # Usamos la variable local, no la constante global
+                                        f_check.seek(i * json_piece_size)
+                                        chunk_data = f_check.read(json_piece_size)
+                                        
                                         if not chunk_data: break
                                         
                                         if hashlib.sha256(chunk_data).hexdigest() == expected_hash:
@@ -762,7 +769,6 @@ class PeerNode:
                                 
                                 # REINICIO CON FORCE_LEECHER
                                 # Si hubo corrupción o faltan piezas, pasamos force_leecher=True
-                                # para que add_manager NO crea que somos seeders solo por el tamaño.
                                 is_imperfect = (corrupted_count > 0) or (len(valid_chunks) < total_chunks)
                                 
                                 self.add_manager(meta['filename'], meta['filehash'], meta['filesize'], KNOWN_TRACKERS, force_leecher=is_imperfect)
@@ -780,6 +786,7 @@ class PeerNode:
 
                     except Exception as e: 
                         print(f"[!] Error leyendo configuración local: {e}")
+                        traceback.print_exc() # Útil para ver el error real
                         if os.path.exists(jpath): os.remove(jpath)
 
                 # ==========================================
@@ -795,7 +802,10 @@ class PeerNode:
                         "filesize": meta['filesize'], 
                         "filehash": f_hash, 
                         "trackers": KNOWN_TRACKERS,
-                        "piece_hashes": meta.get('piece_hashes', []) 
+                        "piece_hashes": meta.get('piece_hashes', []),
+                        # --- CORRECCIÓN 2: Guardar el tamaño de pieza para el futuro ---
+                        "piece_size": meta.get('piece_size', BLOCK_SIZE) 
+                        # ---------------------------------------------------------------
                     }
                     with open(jpath, 'w') as f: json.dump(save_meta, f, indent=4)
                     
@@ -808,7 +818,6 @@ class PeerNode:
         except Exception as e:
             traceback.print_exc()
             print(f"[CRASH] Error fatal: {e}")
-
 
 
 
