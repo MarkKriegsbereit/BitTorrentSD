@@ -16,10 +16,24 @@ from file_manager import FileManager
 KNOWN_TRACKERS = [] 
 
 class PeerNode:
+
+
     def __init__(self, port, tracker_ip_hint):
         self.my_port = port
-        self.my_ip = get_local_ip() 
-        self.my_id = f"{self.my_ip}:{port}"
+        self.my_ip = get_local_ip()
+        
+        
+        print(f"Detectada IP Local: {self.my_ip}")
+        
+        print("¿Estás usando Ngrok o IP Pública manual? (Enter para no)")
+        public_override = input(">> Escribe tu IP:Puerto público (ej. 0.tcp.ngrok.io:12345): ")
+        
+        if public_override.strip():
+            # Si usas Ngrok, esta es tu identidad real ante el mundo
+            self.my_id = public_override.strip() 
+        else:
+            self.my_id = f"{self.my_ip}:{port}"
+        
         
         self.folder = f"peer_{port}"
         if not os.path.exists(self.folder): os.makedirs(self.folder)
