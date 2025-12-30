@@ -300,11 +300,20 @@ class PeerNode:
 
 
 
+
     def handle_upload(self, conn):
         try:
             conn.settimeout(10)
+            # Imprimimos quién se conecta para saber que la petición llegó
+            print(f"[DEBUG SERVER] Conexión entrante establecida...")
+            
             raw = conn.recv(4096).decode()
-            if not raw: return
+            
+            if not raw: 
+                print("[DEBUG SERVER] Recibí 0 bytes (Cliente cerró conexión)")
+                return
+            
+            print(f"[DEBUG SERVER] Datos recibidos: {raw.strip()}") # Ver qué llegó exacto
             
             req = json.loads(raw.strip())
             cmd = req.get('command')
@@ -312,24 +321,24 @@ class PeerNode:
             if cmd == CMD_REQUEST_CHUNK:
                 mgr = self.managers.get(req.get('file_hash'))
                 if mgr:
-                    # Leemos el bloque del disco
                     data = mgr['fm'].read_chunk(req.get('chunk_index'))
-                    
                     if data:
                         header = json.dumps({"status": "ok", "size": len(data)})
-                        
-                        # --- CORRECCIÓN CRÍTICA AQUÍ ---
-                        # Usamos sendall() en lugar de send()
-                        # send() trunca los datos si son grandes (como un bloque de 1MB)
-                        payload = header.encode() + b'\n' + data
-                        conn.sendall(payload)  # <--- CAMBIO: sendall
-                        
+                        conn.sendall(header.encode() + b'\n' + data)
+                        print(f"[DEBUG SERVER] Chunk {req.get('chunk_index')} enviado.")
                     else:
                         conn.sendall(json.dumps({"status": "missing"}).encode() + b'\n')
+                else:
+                    conn.sendall(json.dumps({"status": "missing"}).encode() + b'\n')
             
             elif cmd == CMD_GET_METADATA:
-                mgr = self.managers.get(req.get('file_hash'))
+                requested_hash = req.get('file_hash')
+                print(f"[DEBUG SERVER] Solicitan metadatos para hash: {requested_hash}")
+                
+                mgr = self.managers.get(requested_hash)
+                
                 if mgr:
+                    # Recuperar hashes si existen
                     try:
                         json_path = os.path.join(self.folder, f"{mgr['filename']}.json")
                         with open(json_path, 'r') as f:
@@ -344,15 +353,21 @@ class PeerNode:
                         "trackers": mgr['trackers'],
                         "piece_hashes": hashes 
                     }
-                    # Aquí también es bueno usar sendall por seguridad
-                    conn.sendall(json.dumps(meta).encode() + b'\n') # <--- CAMBIO: sendall
+                    conn.sendall(json.dumps(meta).encode() + b'\n')
+                    print(f"[DEBUG SERVER] Metadatos enviados exitosamente.")
+                else:
+                    print(f"[DEBUG SERVER] ERROR: No tengo cargado el archivo con hash {requested_hash}")
+                    error_msg = {"status": "error", "message": "File not hosted here"}
+                    conn.sendall(json.dumps(error_msg).encode() + b'\n')
 
+        except json.JSONDecodeError:
+            print(f"[ERROR FATAL] Recibí basura que no es JSON válido: {raw}")
         except Exception as e:
-            # print(f"Error upload: {e}") 
-            pass
+            # AQUÍ ESTÁ LA CLAVE: Imprimir el error real con traceback
+            print(f"[ERROR FATAL] Excepción en handle_upload: {e}")
+            traceback.print_exc() 
         finally: 
             conn.close()
-        
         
         
 
@@ -397,13 +412,12 @@ class PeerNode:
         for p_data in peers_list:
             if p_data['id'] == self.my_id: continue 
             target_ip, target_port = p_data['id'].split(':')
-            ips_to_try = [target_ip]
+            ips_to_try = [target_ip, '127.0.0.1']
             for ip_cand in ips_to_try:
                 s = None
                 try:
                     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                    s.settimeout(10)
-                    print(f"Conectando a {ip_cand}:{target_port}...") # Debug visual
+                    s.settimeout(2)
                     s.connect((ip_cand, int(target_port)))
                     
                     # Corrección importante: Enviar \n al final
