@@ -2,6 +2,16 @@
     "filename": "Catacumbas Mystery 2.mp4",
     "filesize": 574998425,
     "filehash": "1dadea5fe8e3058305cb7fba7d9f37568a06ee903073dad6d46c6d912bab25c3",
+    "trackers": [
+        [
+            "3.151.6.85",
+            5000
+        ],
+        [
+            "3.137.135.235",
+            5001
+        ]
+    ],
     "piece_hashes": [
         "b015a2ecc512aba17db8fcfa8428295eab9a44832e3c7dbd7371407f69262ad2",
         "c62c56756399892a0bf20388a7091d750781b6068a6785232c6a5933e69a4728",
@@ -553,14 +563,5 @@
         "8758b4ce6d80cb01b7d746f693720d63f02806c457cf2969564e23cab3cc95bb",
         "14d29891185391c4ff18f5df6ba5b12b008ab66b07f2a80297d47380f4e74fae"
     ],
-    "trackers": [
-        [
-            "3.151.6.85",
-            5000
-        ],
-        [
-            "3.137.135.235",
-            5001
-        ]
-    ]
+    "piece_size": 1048576
 }

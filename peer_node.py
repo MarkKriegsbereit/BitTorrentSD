@@ -113,7 +113,10 @@ class PeerNode:
                 continue
 
             # 3. Ordenar por rendimiento (Latencia)
-            candidates.sort(key=lambda p: self.peer_performance.get(p['id'], 0.5))
+            #candidates.sort(key=lambda p: self.peer_performance.get(p['id'], 0.5))
+            
+            # 3. CAMBIO AQUÍ: Ordenar de MAYOR a MENOR velocidad ---
+            candidates.sort(key=lambda p: self.peer_performance.get(p['id'], 0.0), reverse=True)
             
             # --- MEJORA DE COLABORACIÓN (Shuffle) ---
             # Si hay varios peers buenos, no uses siempre al #1.
@@ -194,19 +197,22 @@ class PeerNode:
                 print("⚠️ Archivo y metadatos eliminados por seguridad.")
 
     def update_peer_score(self, peer_id, time_taken, success):
-        """ Sistema de Puntuación Dinámica """
-        current_avg = self.peer_performance.get(peer_id, 0.5)
-        # Si era nuevo (-1), inicializar
-        if current_avg < 0: current_avg = time_taken
-
+        """ Sistema basado en VELOCIDAD (MB/s) - Versión Mejorada """
+        # Obtenemos la velocidad actual (0.0 si es nuevo)
+        current_speed = self.peer_performance.get(peer_id, 0.0)
+        
         if success:
-            # Suavizado exponencial (30% peso a la nueva muestra)
-            new_score = (current_avg * 0.7) + (time_taken * 0.3)
-        else:
-            # Castigo fuerte por errores
-            new_score = current_avg + 3.0 
+            # Calculamos velocidad instantánea: 1 / tiempo
+            # (Si tarda poco, el valor es alto. Ej: 0.1s -> 10 puntos)
+            instant_speed = 1.0 / (time_taken + 0.00001) # Evitamos división por cero
             
-        self.peer_performance[peer_id] = new_score
+            # Promedio móvil para suavizar picos (70% histórico, 30% nuevo)
+            new_speed = (current_speed * 0.7) + (instant_speed * 0.3)
+        else:
+            # Penalización fuerte si falla: cortamos su velocidad a la mitad
+            new_speed = current_speed * 0.5 
+            
+        self.peer_performance[peer_id] = new_speed
 
     # ==========================================
     #               CLIENTE DE RED
@@ -311,7 +317,7 @@ class PeerNode:
 
     def handle_upload(self, conn):
         try:
-            conn.settimeout(10)
+            conn.settimeout(30)
             # Imprimimos quién se conecta para saber que la petición llegó
             #print(f"[DEBUG SERVER] Conexión entrante establecida...")
             
@@ -401,19 +407,66 @@ class PeerNode:
             return self.managers[file_hash]
 
     def scan_folder(self):
+        print("[*] Escaneando carpeta y verificando integridad...")
         json_files = glob.glob(os.path.join(self.folder, "*.json"))
+        
         for json_path in json_files:
             try:
                 with open(json_path, 'r') as f: meta = json.load(f)
+                
+                # Evitamos procesar si ya lo tenemos cargado en memoria
                 with self.managers_lock:
                     if meta['filehash'] in self.managers: continue
                 
                 real_path = os.path.join(self.folder, meta['filename'])
-                # Si existe el archivo o su progreso, lo cargamos
-                if os.path.exists(real_path) or os.path.exists(real_path + ".progress"):
-                    self.add_manager(meta['filename'], meta['filehash'], meta['filesize'], KNOWN_TRACKERS)
+                progress_file = real_path + ".progress"
+                
+                # --- VERIFICACIÓN REAL DE INTEGRIDAD ---
+                if os.path.exists(real_path) and 'piece_hashes' in meta:
+                    
+                    # 1. Usar el tamaño de pieza del JSON (o el global si no existe)
+                    p_size = meta.get('piece_size', BLOCK_SIZE)
+                    
+                    valid_chunks = []
+                    total_chunks = len(meta['piece_hashes'])
+                    
+                    # 2. Leer el archivo físico y comparar hashes
+                    # Esto tarda unos segundos, pero garantiza que no mientas al tracker
+                    with open(real_path, 'rb') as f_check:
+                        for i, expected_hash in enumerate(meta['piece_hashes']):
+                            f_check.seek(i * p_size)
+                            chunk_data = f_check.read(p_size)
+                            if not chunk_data: break
+                            
+                            if hashlib.sha256(chunk_data).hexdigest() == expected_hash:
+                                valid_chunks.append(i)
+                    
+                    # 3. Determinar si es perfecto
+                    is_perfect = (len(valid_chunks) == total_chunks)
+                    
+                    # 4. Si falta algo, actualizamos el archivo .progress para no perder el avance
+                    if not is_perfect:
+                        pct = (len(valid_chunks) / total_chunks) * 100
+                        print(f"   ⚠️  Recuperado parcial: {meta['filename']} ({pct:.1f}%)")
+                        with open(progress_file, 'w') as f_prog:
+                            json.dump({"downloaded": valid_chunks}, f_prog)
+                    else:
+                        print(f"   ✅ Archivo verificado 100%: {meta['filename']}")
+
+                    # 5. Cargar al Manager (Si no es perfecto, forzamos modo Leecher)
+                    self.add_manager(
+                        meta['filename'], 
+                        meta['filehash'], 
+                        meta['filesize'], 
+                        KNOWN_TRACKERS, 
+                        force_leecher=(not is_perfect) 
+                    )
+                    
+                    # 6. Anunciar estado real al Tracker
                     self.contact_tracker(CMD_ANNOUNCE, meta['filehash'], KNOWN_TRACKERS)
-            except: pass
+
+            except Exception as e: 
+                print(f"[!] Error al escanear {json_path}: {e}")
 
     def fetch_metadata_from_swarm(self, file_hash, peers_list):
         print(f"[*] Buscando metadatos...")
@@ -530,7 +583,9 @@ class PeerNode:
     def heartbeat_loop(self):
         while self.running:
             time.sleep(2)
-            self.scan_folder()
+            
+            #self.scan_folder()
+            
             with self.managers_lock: hashes = list(self.managers.keys())
             for h in hashes:
                 mgr = self.managers.get(h)
