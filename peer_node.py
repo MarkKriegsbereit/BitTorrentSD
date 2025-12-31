@@ -401,19 +401,67 @@ class PeerNode:
             return self.managers[file_hash]
 
     def scan_folder(self):
+        print("[*] Escaneando carpeta y verificando integridad...")
         json_files = glob.glob(os.path.join(self.folder, "*.json"))
+        
         for json_path in json_files:
             try:
                 with open(json_path, 'r') as f: meta = json.load(f)
+                
+                # Evitamos duplicados en memoria
                 with self.managers_lock:
                     if meta['filehash'] in self.managers: continue
                 
                 real_path = os.path.join(self.folder, meta['filename'])
-                # Si existe el archivo o su progreso, lo cargamos
-                if os.path.exists(real_path) or os.path.exists(real_path + ".progress"):
-                    self.add_manager(meta['filename'], meta['filehash'], meta['filesize'], KNOWN_TRACKERS)
+                progress_file = real_path + ".progress"
+                
+                # --- AQUÍ ESTÁ EL CAMBIO PARA HACERLO AUTOMÁTICO ---
+                if os.path.exists(real_path) and 'piece_hashes' in meta:
+                    
+                    # 1. Obtenemos el tamaño de pieza correcto
+                    p_size = meta.get('piece_size', BLOCK_SIZE)
+                    
+                    # 2. Verificamos cuántas piezas REALMENTE tenemos válidas
+                    valid_chunks = []
+                    total_chunks = len(meta['piece_hashes'])
+                    
+                    with open(real_path, 'rb') as f_check:
+                        for i, expected_hash in enumerate(meta['piece_hashes']):
+                            f_check.seek(i * p_size)
+                            chunk_data = f_check.read(p_size)
+                            if not chunk_data: break
+                            
+                            # Verificamos hash
+                            if hashlib.sha256(chunk_data).hexdigest() == expected_hash:
+                                valid_chunks.append(i)
+                    
+                    # 3. Calculamos si es perfecto o imperfecto
+                    is_perfect = (len(valid_chunks) == total_chunks)
+                    
+                    # 4. Si es imperfecto, actualizamos el archivo de progreso
+                    if not is_perfect:
+                        print(f"   ⚠️  Detectado archivo incompleto: {meta['filename']} ({len(valid_chunks)}/{total_chunks} piezas)")
+                        with open(progress_file, 'w') as f_prog:
+                            json.dump({"downloaded": valid_chunks}, f_prog)
+                    else:
+                        print(f"   ✅ Archivo verificado: {meta['filename']}")
+
+                    # 5. Registramos el Manager con la verdad (force_leecher=True si no es perfecto)
+                    # Si no es perfecto, forzamos a que sea Leecher aunque el tamaño coincida
+                    self.add_manager(
+                        meta['filename'], 
+                        meta['filehash'], 
+                        meta['filesize'], 
+                        KNOWN_TRACKERS, 
+                        force_leecher=(not is_perfect) 
+                    )
+                    
+                    # 6. Nos anunciamos al tracker (ahora con el porcentaje real)
                     self.contact_tracker(CMD_ANNOUNCE, meta['filehash'], KNOWN_TRACKERS)
-            except: pass
+
+            except Exception as e: 
+                print(f"[!] Error al escanear {json_path}: {e}")
+                # traceback.print_exc() # Descomentar para debug
 
     def fetch_metadata_from_swarm(self, file_hash, peers_list):
         print(f"[*] Buscando metadatos...")
