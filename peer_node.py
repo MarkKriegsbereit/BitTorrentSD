@@ -113,19 +113,19 @@ class PeerNode:
                 continue
 
             # 3. Ordenar por rendimiento (Latencia)
-            #candidates.sort(key=lambda p: self.peer_performance.get(p['id'], 0.5))
+            candidates.sort(key=lambda p: self.peer_performance.get(p['id'], 0.5))
             
             # 3. CAMBIO AQUÍ: Ordenar de MAYOR a MENOR velocidad ---
-            candidates.sort(key=lambda p: self.peer_performance.get(p['id'], 0.0), reverse=True)
+            #candidates.sort(key=lambda p: self.peer_performance.get(p['id'], 0.0), reverse=True)
             
             # --- MEJORA DE COLABORACIÓN (Shuffle) ---
             # Si hay varios peers buenos, no uses siempre al #1.
             # Tomamos los 3 mejores y elegimos uno al azar. Esto activa la colaboración.
-#            if len(candidates) > 1:
-#                top_n = min(len(candidates), 3)
-#                best_candidates = candidates[:top_n]
-#                random.shuffle(best_candidates) # <--- Aquí está la magia de colaborar
-#                candidates = best_candidates + candidates[top_n:]
+            if len(candidates) > 1:
+                top_n = min(len(candidates), 3)
+                best_candidates = candidates[:top_n]
+                random.shuffle(best_candidates) # <--- Aquí está la magia de colaborar
+                candidates = best_candidates + candidates[top_n:]
             
             # 4. Seleccionar qué pieza pedir
             missing = fm.get_missing_chunks()
