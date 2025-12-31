@@ -57,8 +57,8 @@ class PeerNode:
         if not KNOWN_TRACKERS:
             # Por defecto añadimos el puerto 5000. 
             # Si quieres redundancia automática en la misma IP, podrías añadir más puertos.
-            KNOWN_TRACKERS.append((tracker_ip_hint, 5000))
-            KNOWN_TRACKERS.append((tracker_ip_hint, 5001))
+            KNOWN_TRACKERS.append(("3.151.6.85", 5000))
+            KNOWN_TRACKERS.append(("3.137.135.235", 5001))
         # --------
         
         
@@ -313,7 +313,7 @@ class PeerNode:
         try:
             conn.settimeout(10)
             # Imprimimos quién se conecta para saber que la petición llegó
-            print(f"[DEBUG SERVER] Conexión entrante establecida...")
+            #print(f"[DEBUG SERVER] Conexión entrante establecida...")
             
             raw = conn.recv(4096).decode()
             
@@ -321,7 +321,7 @@ class PeerNode:
                 print("[DEBUG SERVER] Recibí 0 bytes (Cliente cerró conexión)")
                 return
             
-            print(f"[DEBUG SERVER] Datos recibidos: {raw.strip()}") # Ver qué llegó exacto
+            #print(f"[DEBUG SERVER] Datos recibidos: {raw.strip()}") # Ver qué llegó exacto
             
             req = json.loads(raw.strip())
             cmd = req.get('command')
@@ -333,7 +333,7 @@ class PeerNode:
                     if data:
                         header = json.dumps({"status": "ok", "size": len(data)})
                         conn.sendall(header.encode() + b'\n' + data)
-                        print(f"[DEBUG SERVER] Chunk {req.get('chunk_index')} enviado.")
+                        #print(f"[DEBUG SERVER] Chunk {req.get('chunk_index')} enviado.")
                     else:
                         conn.sendall(json.dumps({"status": "missing"}).encode() + b'\n')
                 else:
@@ -443,18 +443,28 @@ class PeerNode:
                     if s: s.close()
         return None
 
+
+
+
+
+
     def contact_tracker(self, command, file_hash=None, trackers=None):
         if not trackers: trackers = KNOWN_TRACKERS
         combined_peers = []
-        combined_files = [] # Para CMD_LIST_FILES
+        combined_files = [] 
         success_count = 0
         
-        # Iteramos por TODOS los trackers conocidos
+        # --- MEMORIA ANTI-SPAM ---
+        # Iniciamos el set si no existe para recordar qué archivos ya avisamos
+        if not hasattr(self, 'announced_files'):
+            self.announced_files = set()
+
+        # Recorremos todos los trackers
         for ip, port in trackers:
             s = None
             try:
                 s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                s.settimeout(2)
+                s.settimeout(5) # 5 segundos de espera máximo por tracker
                 s.connect((ip, port))
                 
                 req = {"command": command, "peer_id": self.my_id}
@@ -464,6 +474,7 @@ class PeerNode:
                     if mgr: req.update({"filename": mgr["filename"], "percent": mgr["fm"].get_progress_percentage()})
                 
                 s.send(json.dumps(req).encode())
+                
                 raw_resp = s.recv(BUFFER_SIZE).decode()
                 if not raw_resp: continue
                 
@@ -471,22 +482,29 @@ class PeerNode:
                 
                 if resp.get('status') == 'ok':
                     success_count += 1
-                    # Si pedimos lista de archivos, acumulamos resultados de todos los trackers
+                    
                     if command == CMD_LIST_FILES and 'files' in resp:
                         combined_files.extend(resp['files'])
                     
-                    # Si es un anuncio, acumulamos peers de todos los trackers
                     if command == CMD_ANNOUNCE and 'peers' in resp:
                         combined_peers.extend(resp['peers'])
+
             except:
-                # Si un tracker falla, simplemente probamos el siguiente
-                pass
+                pass # Si falla uno, seguimos con el siguiente en silencio
             finally:
                 if s: s.close()
         
-        # Procesar resultados combinados
+        # --- MENSAJE AL USUARIO (Solo una vez por archivo) ---
+        # Se ejecuta SOLO si es un Anuncio, si hubo éxito, y si NO lo hemos dicho antes.
+        if command == CMD_ANNOUNCE and file_hash and success_count > 0:
+            if file_hash not in self.announced_files:
+                mgr = self.managers.get(file_hash)
+                fname = mgr['filename'] if mgr else "Archivo"
+                print(f"[🌐] Enjambre conectado: {fname} (Visible en {success_count} trackers)")
+                self.announced_files.add(file_hash)
+
+        # Procesamiento de duplicados
         if command == CMD_LIST_FILES:
-            # Eliminar duplicados de archivos basados en hash
             seen_hashes = set()
             unique_files = []
             for f in combined_files:
@@ -496,7 +514,6 @@ class PeerNode:
             return unique_files
             
         if command == CMD_ANNOUNCE:
-            # Eliminar duplicados de peers
             seen = set()
             unique_peers = []
             for p in combined_peers:
